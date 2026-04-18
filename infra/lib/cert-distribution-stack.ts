@@ -125,6 +125,40 @@ export class CertDistributionStack extends cdk.Stack {
       },
     }));
 
+    // --- Lock down data access to the two roles ---------------------------
+    // Without this, any principal in the AWS account whose identity policy
+    // grants s3 actions (e.g. AdministratorAccess) could read wildcard.key.
+    // The private key is the real blast radius here: whoever holds it can
+    // MITM anything behind *.<certDomain>. So we explicitly deny data ops
+    // to every principal except the two role ARNs.
+    //
+    // Scoped to DATA actions only — management actions like PutBucketPolicy
+    // remain governed by identity policies, so IAM admins can still manage
+    // the bucket and `cdk deploy` keeps working without special-casing.
+    bucket.addToResourcePolicy(new iam.PolicyStatement({
+      sid: 'DenyDataAccessExceptRoles',
+      effect: iam.Effect.DENY,
+      principals: [new iam.AnyPrincipal()],
+      actions: [
+        's3:GetObject',
+        's3:GetObjectVersion',
+        's3:GetObjectAcl',
+        's3:GetObjectVersionAcl',
+        's3:PutObject',
+        's3:PutObjectAcl',
+        's3:DeleteObject',
+        's3:DeleteObjectVersion',
+        's3:ListBucket',
+        's3:ListBucketVersions',
+      ],
+      resources: [bucket.bucketArn, bucket.arnForObjects('*')],
+      conditions: {
+        StringNotEquals: {
+          'aws:PrincipalArn': [renewerRole.roleArn, consumerRole.roleArn],
+        },
+      },
+    }));
+
     // --- Instance profiles ------------------------------------------------
     // CDK creates these implicitly when you pass a role to ec2.Instance, but
     // since the EC2 hosts are provisioned outside this stack (Coolify), we
