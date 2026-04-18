@@ -131,6 +131,9 @@ x64/
 x86/
 bld/
 [Bb]in/
+# CDK entry point lives at infra/bin/app.ts — source code, not a build artifact.
+!infra/bin/
+!infra/bin/app.ts
 [Oo]bj/
 [Ll]og/
 
