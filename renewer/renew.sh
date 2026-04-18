@@ -49,6 +49,7 @@ build_lego_args() {
     local -a args=(
         --email "${ACME_EMAIL}"
         --dns route53
+        --dns.resolvers "1.1.1.1:53,8.8.8.8:53"
         --domains "${CERT_DOMAIN}"
         --domains "*.${CERT_DOMAIN}"
         --path "${LEGO_PATH}"
