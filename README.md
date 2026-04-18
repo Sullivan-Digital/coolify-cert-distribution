@@ -49,6 +49,8 @@ Traefik instance independently requesting certs for the same wildcard.
 
 ## Pieces
 
+- `infra/` — AWS CDK project that provisions the S3 bucket and the two EC2
+  instance roles (renewer + consumer). Run this first.
 - `renewer/` — deploy once, on any Coolify-managed server. Obtains the
   wildcard via Route 53 DNS-01, pushes to S3.
 - `consumer/` — deploy on every Coolify server that serves HTTPS with
@@ -58,8 +60,12 @@ Each folder has its own README with deployment and IAM-policy details.
 
 ## Ordering of operations for initial setup
 
-1. Create S3 bucket (see renewer README for bucket config).
-2. Create two IAM users (renewer = R53+S3 write, consumer = S3 read).
+1. Deploy the CDK stack in `infra/` — creates the bucket and both EC2
+   instance roles. Note the stack outputs: bucket name, hosted zone id,
+   and the two instance-profile names.
+2. Attach the instance profiles to the EC2 hosts: the renewer profile on
+   the one server that will run `cert-renewer`, the consumer profile on
+   every server that runs a Coolify proxy.
 3. Deploy the renewer somewhere. Container starts and sits idle.
 4. Add a Scheduled Task to the renewer: command `/usr/local/bin/renew.sh`,
    cron `0 3 * * *`. Set `USE_STAGING=true` for the first run.
