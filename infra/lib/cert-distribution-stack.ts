@@ -44,7 +44,7 @@ export class CertDistributionStack extends cdk.Stack {
     // Standalone managed policy so it can be attached to any EC2 instance
     // role that runs a cert-renewer container, without having to re-declare
     // the permissions. Mirrors the least-privilege policy in renewer/README.md.
-    const renewerPolicy = new iam.ManagedPolicy(this, 'CertDistributionRenewerPolicy', {
+    const renewerPolicy = new iam.ManagedPolicy(this, 'RenewerPolicy', {
       description: 'Cert-renewer permissions: Route53 DNS-01 + S3 cert write',
       statements: [
         new iam.PolicyStatement({
@@ -102,7 +102,7 @@ export class CertDistributionStack extends cdk.Stack {
     // --- Consumer managed policy ------------------------------------------
     // Attach to any EC2 instance role that runs a cert-consumer container.
     // Read-only access to the cert prefix. Mirrors consumer/README.md.
-    const consumerPolicy = new iam.ManagedPolicy(this, 'CertDistributionConsumerPolicy', {
+    const consumerPolicy = new iam.ManagedPolicy(this, 'ConsumerPolicy', {
       description: 'Cert-consumer permissions: read-only S3 cert prefix',
       statements: [
         new iam.PolicyStatement({
@@ -125,13 +125,13 @@ export class CertDistributionStack extends cdk.Stack {
     // Convenience roles pre-attached to the managed policies above, for the
     // common case of one renewer host and one initial consumer host. For
     // additional servers, mint your own role and attach the managed policy.
-    const renewerRole = new iam.Role(this, 'CertDistributionRenewerRole', {
+    const renewerRole = new iam.Role(this, 'RenewerRole', {
       assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
       description: 'Default instance role for cert-renewer',
       managedPolicies: [renewerPolicy],
     });
 
-    const consumerRole = new iam.Role(this, 'CertDistributionConsumerRole', {
+    const consumerRole = new iam.Role(this, 'ConsumerRole', {
       assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
       description: 'Default instance role for cert-consumer',
       managedPolicies: [consumerPolicy],
@@ -142,11 +142,11 @@ export class CertDistributionStack extends cdk.Stack {
     // since the EC2 hosts are provisioned outside this stack (Coolify), we
     // emit the profiles explicitly so they can be attached via the console
     // or a launch template.
-    const renewerProfile = new iam.CfnInstanceProfile(this, 'CertDistributionRenewerInstanceProfile', {
+    const renewerProfile = new iam.CfnInstanceProfile(this, 'RenewerInstanceProfile', {
       roles: [renewerRole.roleName],
     });
 
-    const consumerProfile = new iam.CfnInstanceProfile(this, 'CertDistributionConsumerInstanceProfile', {
+    const consumerProfile = new iam.CfnInstanceProfile(this, 'ConsumerInstanceProfile', {
       roles: [consumerRole.roleName],
     });
 
