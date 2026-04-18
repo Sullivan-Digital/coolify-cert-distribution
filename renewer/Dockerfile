@@ -14,6 +14,7 @@ RUN apk add --no-cache \
         jq \
         tzdata \
         coreutils \
+        openssl \
     && curl -fsSL "https://github.com/go-acme/lego/releases/download/v${LEGO_VERSION}/lego_v${LEGO_VERSION}_linux_${TARGETARCH}.tar.gz" \
         -o /tmp/lego.tar.gz \
     && tar -xzf /tmp/lego.tar.gz -C /usr/local/bin lego \
