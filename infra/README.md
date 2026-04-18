@@ -4,15 +4,19 @@ AWS CDK project that provisions the shared infrastructure for `cert-renewer`
 and `cert-consumer`:
 
 - **S3 bucket** (private, SSE-S3, TLS-only, retained on stack delete)
-- **RenewerRole** — EC2 instance role with Route 53 DNS-01 + S3 write, scoped
-  to a single `_acme-challenge.<certDomain>` TXT record
-- **ConsumerRole** — EC2 instance role with read-only access to the cert
-  prefix
-- **Instance profiles** for both roles, ready to attach to existing EC2 hosts
+- **RenewerPolicy** — managed policy granting Route 53 DNS-01 + S3 write,
+  scoped to a single `_acme-challenge.<certDomain>` TXT record. Attach to
+  any EC2 instance role that runs `cert-renewer`.
+- **ConsumerPolicy** — managed policy granting read-only access to the
+  cert prefix. Attach to any EC2 instance role that runs `cert-consumer`.
+- **Default roles + instance profiles** (`RenewerRole`, `ConsumerRole`)
+  with the managed policies pre-attached, for the common case of one
+  renewer host and one initial consumer host.
 
 The stack does **not** provision EC2 instances, VPCs, or Coolify — it only
-creates the bucket and the IAM pieces. Attach the instance profiles to the
-EC2 hosts that already run your Coolify proxies.
+creates the bucket and the IAM pieces. For the common case, attach the
+default instance profiles to your existing EC2 hosts. For additional
+servers, mint your own role and attach the matching managed-policy ARN.
 
 ## Prerequisites
 
@@ -58,10 +62,12 @@ After a successful deploy, CloudFormation emits:
 | ----------------------------- | ---------------------------------------------------------- |
 | `BucketName`                  | `S3_BUCKET` env on both renewer and consumer               |
 | `HostedZoneId`                | `AWS_HOSTED_ZONE_ID` env on the renewer                    |
-| `RenewerInstanceProfileName`  | Attach to the EC2 host running `cert-renewer`              |
-| `ConsumerInstanceProfileName` | Attach to every EC2 host running `cert-consumer`           |
-| `RenewerRoleArn`              | Reference if you need cross-account assume-role later      |
-| `ConsumerRoleArn`             | Same                                                       |
+| `RenewerPolicyArn`            | Attach to any EC2 instance role that runs `cert-renewer`   |
+| `ConsumerPolicyArn`           | Attach to any EC2 instance role that runs `cert-consumer`  |
+| `RenewerInstanceProfileName`  | Default profile for the `cert-renewer` host                |
+| `ConsumerInstanceProfileName` | Default profile for a `cert-consumer` host                 |
+| `RenewerRoleArn`              | Default renewer role (e.g. for cross-account assume-role)  |
+| `ConsumerRoleArn`             | Default consumer role (same)                               |
 
 Once the instance profiles are attached, you can leave `AWS_ACCESS_KEY_ID`
 and `AWS_SECRET_ACCESS_KEY` **unset** in the container environment — both

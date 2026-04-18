@@ -40,124 +40,102 @@ export class CertDistributionStack extends cdk.Stack {
       domainName: props.zoneName,
     });
 
-    // --- Renewer role -----------------------------------------------------
-    // Attach this to the EC2 instance running the cert-renewer container.
-    // Mirrors the least-privilege policy documented in renewer/README.md.
+    // --- Renewer managed policy -------------------------------------------
+    // Standalone managed policy so it can be attached to any EC2 instance
+    // role that runs a cert-renewer container, without having to re-declare
+    // the permissions. Mirrors the least-privilege policy in renewer/README.md.
+    const renewerPolicy = new iam.ManagedPolicy(this, 'RenewerPolicy', {
+      description: 'Cert-renewer permissions: Route53 DNS-01 + S3 cert write',
+      statements: [
+        new iam.PolicyStatement({
+          sid: 'Route53AcmeChallenge',
+          actions: ['route53:GetChange'],
+          resources: ['arn:aws:route53:::change/*'],
+        }),
+        new iam.PolicyStatement({
+          sid: 'Route53ListZones',
+          actions: ['route53:ListHostedZonesByName'],
+          resources: ['*'],
+        }),
+        new iam.PolicyStatement({
+          sid: 'Route53ReadZone',
+          actions: ['route53:ListResourceRecordSets'],
+          resources: [hostedZone.hostedZoneArn],
+        }),
+        // Scope writes to the single _acme-challenge TXT record for certDomain.
+        // If this policy leaks onto a role that's then compromised, the attacker
+        // still can't rewrite MX/A/other records.
+        new iam.PolicyStatement({
+          sid: 'Route53WriteChallengeOnly',
+          actions: ['route53:ChangeResourceRecordSets'],
+          resources: [hostedZone.hostedZoneArn],
+          conditions: {
+            'ForAllValues:StringEquals': {
+              'route53:ChangeResourceRecordSetsNormalizedRecordNames': [
+                `_acme-challenge.${props.certDomain}`,
+              ],
+              'route53:ChangeResourceRecordSetsRecordTypes': ['TXT'],
+            },
+          },
+        }),
+        new iam.PolicyStatement({
+          sid: 'S3WriteCerts',
+          actions: [
+            's3:PutObject',
+            's3:PutObjectAcl',
+            's3:GetObject',
+            's3:DeleteObject',
+          ],
+          resources: [prefixObjectsArn],
+        }),
+        new iam.PolicyStatement({
+          sid: 'S3ListBucket',
+          actions: ['s3:ListBucket'],
+          resources: [bucket.bucketArn],
+          conditions: {
+            StringLike: { 's3:prefix': [`${s3Prefix}/*`] },
+          },
+        }),
+      ],
+    });
+
+    // --- Consumer managed policy ------------------------------------------
+    // Attach to any EC2 instance role that runs a cert-consumer container.
+    // Read-only access to the cert prefix. Mirrors consumer/README.md.
+    const consumerPolicy = new iam.ManagedPolicy(this, 'ConsumerPolicy', {
+      description: 'Cert-consumer permissions: read-only S3 cert prefix',
+      statements: [
+        new iam.PolicyStatement({
+          sid: 'S3ReadCerts',
+          actions: ['s3:GetObject'],
+          resources: [prefixObjectsArn],
+        }),
+        new iam.PolicyStatement({
+          sid: 'S3ListBucketPrefix',
+          actions: ['s3:ListBucket'],
+          resources: [bucket.bucketArn],
+          conditions: {
+            StringLike: { 's3:prefix': [`${s3Prefix}/*`] },
+          },
+        }),
+      ],
+    });
+
+    // --- Default roles ----------------------------------------------------
+    // Convenience roles pre-attached to the managed policies above, for the
+    // common case of one renewer host and one initial consumer host. For
+    // additional servers, mint your own role and attach the managed policy.
     const renewerRole = new iam.Role(this, 'RenewerRole', {
       assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
-      description: 'Instance role for cert-renewer: Route53 DNS-01 + S3 write',
+      description: 'Default instance role for cert-renewer',
+      managedPolicies: [renewerPolicy],
     });
 
-    renewerRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'Route53AcmeChallenge',
-      actions: ['route53:GetChange'],
-      resources: ['arn:aws:route53:::change/*'],
-    }));
-
-    renewerRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'Route53ListZones',
-      actions: ['route53:ListHostedZonesByName'],
-      resources: ['*'],
-    }));
-
-    renewerRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'Route53ReadZone',
-      actions: ['route53:ListResourceRecordSets'],
-      resources: [hostedZone.hostedZoneArn],
-    }));
-
-    // Scope writes to the single _acme-challenge TXT record for certDomain.
-    // If this role leaks, attacker can't rewrite MX/A/other records.
-    renewerRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'Route53WriteChallengeOnly',
-      actions: ['route53:ChangeResourceRecordSets'],
-      resources: [hostedZone.hostedZoneArn],
-      conditions: {
-        'ForAllValues:StringEquals': {
-          'route53:ChangeResourceRecordSetsNormalizedRecordNames': [
-            `_acme-challenge.${props.certDomain}`,
-          ],
-          'route53:ChangeResourceRecordSetsRecordTypes': ['TXT'],
-        },
-      },
-    }));
-
-    renewerRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'S3WriteCerts',
-      actions: [
-        's3:PutObject',
-        's3:PutObjectAcl',
-        's3:GetObject',
-        's3:DeleteObject',
-      ],
-      resources: [prefixObjectsArn],
-    }));
-
-    renewerRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'S3ListBucket',
-      actions: ['s3:ListBucket'],
-      resources: [bucket.bucketArn],
-      conditions: {
-        StringLike: { 's3:prefix': [`${s3Prefix}/*`] },
-      },
-    }));
-
-    // --- Consumer role ----------------------------------------------------
-    // Attach this to EVERY EC2 instance running a cert-consumer container.
-    // Read-only access to the cert prefix. Mirrors consumer/README.md.
     const consumerRole = new iam.Role(this, 'ConsumerRole', {
       assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
-      description: 'Instance role for cert-consumer: read-only S3 cert prefix',
+      description: 'Default instance role for cert-consumer',
+      managedPolicies: [consumerPolicy],
     });
-
-    consumerRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'S3ReadCerts',
-      actions: ['s3:GetObject'],
-      resources: [prefixObjectsArn],
-    }));
-
-    consumerRole.addToPolicy(new iam.PolicyStatement({
-      sid: 'S3ListBucketPrefix',
-      actions: ['s3:ListBucket'],
-      resources: [bucket.bucketArn],
-      conditions: {
-        StringLike: { 's3:prefix': [`${s3Prefix}/*`] },
-      },
-    }));
-
-    // --- Lock down data access to the two roles ---------------------------
-    // Without this, any principal in the AWS account whose identity policy
-    // grants s3 actions (e.g. AdministratorAccess) could read wildcard.key.
-    // The private key is the real blast radius here: whoever holds it can
-    // MITM anything behind *.<certDomain>. So we explicitly deny data ops
-    // to every principal except the two role ARNs.
-    //
-    // Scoped to DATA actions only — management actions like PutBucketPolicy
-    // remain governed by identity policies, so IAM admins can still manage
-    // the bucket and `cdk deploy` keeps working without special-casing.
-    bucket.addToResourcePolicy(new iam.PolicyStatement({
-      sid: 'DenyDataAccessExceptRoles',
-      effect: iam.Effect.DENY,
-      principals: [new iam.AnyPrincipal()],
-      actions: [
-        's3:GetObject',
-        's3:GetObjectVersion',
-        's3:GetObjectAcl',
-        's3:GetObjectVersionAcl',
-        's3:PutObject',
-        's3:PutObjectAcl',
-        's3:DeleteObject',
-        's3:DeleteObjectVersion',
-        's3:ListBucket',
-        's3:ListBucketVersions',
-      ],
-      resources: [bucket.bucketArn, bucket.arnForObjects('*')],
-      conditions: {
-        StringNotEquals: {
-          'aws:PrincipalArn': [renewerRole.roleArn, consumerRole.roleArn],
-        },
-      },
-    }));
 
     // --- Instance profiles ------------------------------------------------
     // CDK creates these implicitly when you pass a role to ec2.Instance, but
@@ -179,16 +157,24 @@ export class CertDistributionStack extends cdk.Stack {
     });
     new cdk.CfnOutput(this, 'BucketArn', { value: bucket.bucketArn });
 
+    new cdk.CfnOutput(this, 'RenewerPolicyArn', {
+      value: renewerPolicy.managedPolicyArn,
+      description: 'Attach to any EC2 instance role that runs cert-renewer.',
+    });
     new cdk.CfnOutput(this, 'RenewerRoleArn', { value: renewerRole.roleArn });
     new cdk.CfnOutput(this, 'RenewerInstanceProfileName', {
       value: renewerProfile.ref,
-      description: 'Attach to the EC2 instance running cert-renewer.',
+      description: 'Default instance profile for the cert-renewer host.',
     });
 
+    new cdk.CfnOutput(this, 'ConsumerPolicyArn', {
+      value: consumerPolicy.managedPolicyArn,
+      description: 'Attach to any EC2 instance role that runs cert-consumer.',
+    });
     new cdk.CfnOutput(this, 'ConsumerRoleArn', { value: consumerRole.roleArn });
     new cdk.CfnOutput(this, 'ConsumerInstanceProfileName', {
       value: consumerProfile.ref,
-      description: 'Attach to every EC2 instance running cert-consumer.',
+      description: 'Default instance profile for a cert-consumer host.',
     });
 
     new cdk.CfnOutput(this, 'HostedZoneId', {

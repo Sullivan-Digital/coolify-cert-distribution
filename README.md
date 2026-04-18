@@ -60,12 +60,16 @@ Each folder has its own README with deployment and IAM-policy details.
 
 ## Ordering of operations for initial setup
 
-1. Deploy the CDK stack in `infra/` — creates the bucket and both EC2
-   instance roles. Note the stack outputs: bucket name, hosted zone id,
-   and the two instance-profile names.
-2. Attach the instance profiles to the EC2 hosts: the renewer profile on
-   the one server that will run `cert-renewer`, the consumer profile on
-   every server that runs a Coolify proxy.
+1. Deploy the CDK stack in `infra/` — creates the bucket, two managed
+   IAM policies (renewer, consumer), and default instance roles that
+   have those policies attached. Note the stack outputs: bucket name,
+   hosted zone id, the two policy ARNs, and the two default
+   instance-profile names.
+2. Attach the default instance profiles to the EC2 hosts: the renewer
+   profile on the one server that will run `cert-renewer`, the consumer
+   profile on every server that runs a Coolify proxy. For additional
+   servers, you can either reuse these profiles or mint your own role
+   per server and attach the matching managed policy ARN.
 3. Deploy the renewer somewhere. Container starts and sits idle.
 4. Add a Scheduled Task to the renewer: command `/usr/local/bin/renew.sh`,
    cron `0 3 * * *`. Set `USE_STAGING=true` for the first run.
