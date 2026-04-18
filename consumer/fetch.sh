@@ -10,12 +10,15 @@
 set -euo pipefail
 
 # --- Required environment ---------------------------------------------------
-: "${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID must be set (read-only to cert bucket)}"
-: "${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY must be set}"
 : "${AWS_REGION:?AWS_REGION must be set (e.g. ap-southeast-2)}"
 : "${S3_BUCKET:?S3_BUCKET must be set}"
 
 # --- Optional environment ---------------------------------------------------
+# AWS credentials are optional: if unset, the AWS CLI falls back to its
+# default credential chain, which picks up the EC2 instance profile / IAM
+# role attached to the host. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
+# explicitly only if you're running somewhere without an instance role.
+
 S3_PREFIX="${S3_PREFIX:-certs/wildcard}"
 
 # Directory on the host where Coolify's Traefik expects cert files.

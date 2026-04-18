@@ -55,8 +55,14 @@ try to renew the staging cert), and re-run to get a production cert.
 
 ## IAM policy for the AWS credentials
 
-The IAM user needs two things: Route 53 write access for the ACME DNS-01
-challenge, and S3 write access to the cert bucket. Least-privilege policy:
+The IAM principal needs two things: Route 53 write access for the ACME
+DNS-01 challenge, and S3 write access to the cert bucket. On EC2, attach
+this policy to the instance's IAM role and leave `AWS_ACCESS_KEY_ID` /
+`AWS_SECRET_ACCESS_KEY` unset — both lego and the AWS CLI pick up
+credentials from IMDS automatically. Set the static keys only when running
+somewhere without an instance role.
+
+Least-privilege policy:
 
 ```json
 {

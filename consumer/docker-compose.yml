@@ -7,12 +7,14 @@
 # See README for scheduled-task setup.
 #
 # Required environment variables (set in Coolify's UI):
-#   AWS_ACCESS_KEY_ID         IAM user with READ-ONLY access to the cert bucket
-#   AWS_SECRET_ACCESS_KEY
 #   AWS_REGION                e.g. ap-southeast-2
 #   S3_BUCKET                 same bucket as the renewer writes to
 #
 # Optional:
+#   AWS_ACCESS_KEY_ID         IAM user with READ-ONLY access to the cert bucket.
+#   AWS_SECRET_ACCESS_KEY     Omit both when running on EC2 with an instance
+#                             role attached — the AWS CLI will pick up creds
+#                             from IMDS automatically.
 #   S3_PREFIX                 default: certs/wildcard
 #   RELOAD_METHOD             touch (default) | restart | none
 #   PROXY_CONTAINER           default: coolify-proxy (only used if RELOAD_METHOD=restart)

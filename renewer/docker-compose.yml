@@ -8,13 +8,15 @@
 # Required environment variables (set these in Coolify's UI, not here):
 #   CERT_DOMAIN               e.g. internal.sullivandigital.com.au
 #   ACME_EMAIL                contact for Let's Encrypt
-#   AWS_ACCESS_KEY_ID         IAM user with Route 53 + S3 permissions
-#   AWS_SECRET_ACCESS_KEY
 #   AWS_REGION                e.g. ap-southeast-2
 #   AWS_HOSTED_ZONE_ID        Route 53 zone id for the parent domain
 #   S3_BUCKET                 bucket name that holds the cert
 #
 # Optional:
+#   AWS_ACCESS_KEY_ID         IAM user with Route 53 + S3 permissions.
+#   AWS_SECRET_ACCESS_KEY     Omit both when running on EC2 with an instance
+#                             role attached — lego and the AWS CLI both pick
+#                             up creds from IMDS automatically.
 #   S3_PREFIX                 key prefix in bucket (default: certs/wildcard)
 #   USE_STAGING               "true" to use Let's Encrypt staging (for testing)
 #   RENEW_DAYS                days-before-expiry renewal window (default: 30)

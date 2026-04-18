@@ -11,13 +11,16 @@ set -euo pipefail
 # --- Required environment ---------------------------------------------------
 : "${CERT_DOMAIN:?CERT_DOMAIN must be set (e.g. internal.example.com)}"
 : "${ACME_EMAIL:?ACME_EMAIL must be set}"
-: "${AWS_ACCESS_KEY_ID:?AWS_ACCESS_KEY_ID must be set (with Route 53 + S3 perms)}"
-: "${AWS_SECRET_ACCESS_KEY:?AWS_SECRET_ACCESS_KEY must be set}"
 : "${AWS_REGION:?AWS_REGION must be set (e.g. ap-southeast-2)}"
 : "${AWS_HOSTED_ZONE_ID:?AWS_HOSTED_ZONE_ID must be set (Route 53 zone id)}"
 : "${S3_BUCKET:?S3_BUCKET must be set (e.g. my-certs-bucket)}"
 
 # --- Optional environment ---------------------------------------------------
+# AWS credentials are optional: if unset, both lego and the AWS CLI fall back
+# to the default credential chain, which picks up the EC2 instance profile /
+# IAM role attached to the host. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
+# explicitly only if you're running somewhere without an instance role.
+
 # Key prefix inside the bucket. Cert lands at s3://${S3_BUCKET}/${S3_PREFIX}/
 S3_PREFIX="${S3_PREFIX:-certs/wildcard}"
 

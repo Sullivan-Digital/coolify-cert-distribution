@@ -42,10 +42,15 @@ Subsequent runs only do anything if the renewer has uploaded a new cert
 
 ## IAM policy for the AWS credentials
 
-This is a **separate** IAM user from the renewer — read-only access to the
-cert bucket, nothing else. If a consumer server is compromised, the attacker
-gets the wildcard cert (which they already have on-disk anyway) and the
-ability to read that bucket prefix. Nothing more.
+This is a **separate** IAM role/user from the renewer — read-only access to
+the cert bucket, nothing else. If a consumer server is compromised, the
+attacker gets the wildcard cert (which they already have on-disk anyway)
+and the ability to read that bucket prefix. Nothing more.
+
+On EC2, attach this policy to the instance's IAM role and leave
+`AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` unset — the AWS CLI picks up
+credentials from IMDS automatically. Set the static keys only when running
+somewhere without an instance role.
 
 ```json
 {
