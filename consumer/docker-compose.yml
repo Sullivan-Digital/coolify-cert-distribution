@@ -1,0 +1,44 @@
+# Deploy this as a Docker Compose resource in Coolify on EACH server that
+# runs a coolify-proxy (Traefik) instance that should serve the wildcard cert.
+#
+# This container stays running continuously (sleep infinity). The actual
+# fetch work is triggered by Coolify's Scheduled Tasks feature, which runs
+# `docker exec cert-consumer /usr/local/bin/fetch.sh` on a cron.
+# See README for scheduled-task setup.
+#
+# Required environment variables (set in Coolify's UI):
+#   AWS_ACCESS_KEY_ID         IAM user with READ-ONLY access to the cert bucket
+#   AWS_SECRET_ACCESS_KEY
+#   AWS_REGION                e.g. ap-southeast-2
+#   S3_BUCKET                 same bucket as the renewer writes to
+#
+# Optional:
+#   S3_PREFIX                 default: certs/wildcard
+#   RELOAD_METHOD             touch (default) | restart | none
+#   PROXY_CONTAINER           default: coolify-proxy (only used if RELOAD_METHOD=restart)
+
+services:
+  cert-consumer:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: cert-consumer:latest
+    container_name: cert-consumer
+    environment:
+      - AWS_ACCESS_KEY_ID
+      - AWS_SECRET_ACCESS_KEY
+      - AWS_REGION
+      - S3_BUCKET
+      - S3_PREFIX
+      - RELOAD_METHOD
+      - PROXY_CONTAINER
+    volumes:
+      # Bind-mount the host's /data/coolify/proxy directory so we can write
+      # to the same location that coolify-proxy reads from. Inside the
+      # container this appears at /host-coolify/proxy.
+      - /data/coolify/proxy:/host-coolify/proxy
+      # Required only if RELOAD_METHOD=restart: lets the container run
+      # `docker restart coolify-proxy`. If you're using RELOAD_METHOD=touch
+      # (recommended), you can remove this mount.
+      - /var/run/docker.sock:/var/run/docker.sock
+    restart: unless-stopped
