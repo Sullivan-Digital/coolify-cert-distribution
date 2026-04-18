@@ -3,6 +3,8 @@ FROM alpine:3.20
 
 # lego version is pinned; bump intentionally when you want to update.
 ARG LEGO_VERSION=4.19.2
+# Populated by BuildKit from the target platform (e.g. amd64, arm64).
+ARG TARGETARCH
 
 RUN apk add --no-cache \
         bash \
@@ -12,7 +14,7 @@ RUN apk add --no-cache \
         jq \
         tzdata \
         coreutils \
-    && curl -fsSL "https://github.com/go-acme/lego/releases/download/v${LEGO_VERSION}/lego_v${LEGO_VERSION}_linux_amd64.tar.gz" \
+    && curl -fsSL "https://github.com/go-acme/lego/releases/download/v${LEGO_VERSION}/lego_v${LEGO_VERSION}_linux_${TARGETARCH}.tar.gz" \
         -o /tmp/lego.tar.gz \
     && tar -xzf /tmp/lego.tar.gz -C /usr/local/bin lego \
     && rm /tmp/lego.tar.gz \
