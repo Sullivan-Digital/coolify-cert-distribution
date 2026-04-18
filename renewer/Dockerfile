@@ -22,7 +22,8 @@ RUN apk add --no-cache \
     && chmod +x /usr/local/bin/lego
 
 COPY renew.sh /usr/local/bin/renew.sh
-RUN chmod +x /usr/local/bin/renew.sh
+COPY healthcheck.sh /usr/local/bin/healthcheck.sh
+RUN chmod +x /usr/local/bin/renew.sh /usr/local/bin/healthcheck.sh
 
 # Lego writes its account state and cert files here. Mount a persistent volume
 # at /data/lego so the ACME account key and cert history survive container

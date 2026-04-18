@@ -44,6 +44,18 @@ services:
       # Losing this is not catastrophic (lego will just re-register and
       # re-issue), but it burns a rate-limit slot unnecessarily.
       - lego_data:/data/lego
+    # Healthcheck reads metadata.json from S3 and fails if not_after is
+    # less than 14 days away. This is the silent-failure mode: renewer's
+    # scheduled task has been broken long enough that the cert is about
+    # to expire. Coolify surfaces unhealthy containers via its notifications.
+    # start_period gives the container time to come up before the first
+    # check; interval is long because cert expiry moves slowly.
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
+      interval: 1h
+      timeout: 30s
+      start_period: 1m
+      retries: 3
     # Container stays up continuously so Coolify's Scheduled Tasks feature
     # can `docker exec` into it on a cron. The actual work is triggered by
     # the scheduled task, not by container lifecycle.

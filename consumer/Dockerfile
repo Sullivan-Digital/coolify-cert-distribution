@@ -13,9 +13,13 @@ RUN apk add --no-cache \
         docker-cli
 
 COPY fetch.sh /usr/local/bin/fetch.sh
-RUN chmod +x /usr/local/bin/fetch.sh
+COPY healthcheck.sh /usr/local/bin/healthcheck.sh
+COPY entrypoint.sh /usr/local/bin/entrypoint.sh
+RUN chmod +x /usr/local/bin/fetch.sh /usr/local/bin/healthcheck.sh /usr/local/bin/entrypoint.sh
 
-# Container stays running so Coolify's Scheduled Tasks can `docker exec` into
-# it on a cron. The actual work is triggered by invoking fetch.sh via
-# Scheduled Tasks, not by the container's own lifecycle.
-CMD ["sleep", "infinity"]
+# Entrypoint runs fetch.sh once at startup (so a fresh deploy isn't stuck
+# waiting up to 12h for the first Coolify scheduled-task tick) and then
+# sleeps forever so Coolify's Scheduled Tasks can `docker exec` into it.
+# If the bootstrap fetch fails, the container exits and Coolify's restart
+# policy kicks in.
+CMD ["/usr/local/bin/entrypoint.sh"]

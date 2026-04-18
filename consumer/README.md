@@ -1,11 +1,12 @@
 # cert-consumer
 
 Runs on **every** Coolify-managed server that has a `coolify-proxy` (Traefik)
-instance serving wildcard-domain services. Container stays running
-continuously; Coolify's **Scheduled Tasks** feature triggers the fetch
-script on a cron via `docker exec`. The script polls S3 for cert updates;
-downloads, verifies, and installs the cert if changed; triggers a Traefik
-reload.
+instance serving wildcard-domain services. On startup the container runs
+`fetch.sh` once to bootstrap the cert (crashlooping on failure so config
+errors are visible), then stays running continuously. Coolify's **Scheduled
+Tasks** feature triggers subsequent fetches on a cron via `docker exec`.
+The script polls S3 for cert updates; downloads, verifies, and installs
+the cert if changed; triggers a Traefik reload.
 
 ## How it reloads Traefik
 
@@ -26,19 +27,19 @@ with older inotify).
 1. Zip this folder and deploy as a Docker Compose resource on each server
    that has a Coolify proxy running.
 2. Set the environment variables in Coolify's UI.
-3. Deploy it. The container stays running; fetching is triggered via
-   scheduled task.
+3. Deploy it. The container runs `fetch.sh` once at startup to populate
+   the cert; if that fails (IAM, bucket, network) the container exits and
+   Coolify's restart policy loops it, so config errors are visible rather
+   than silent. After a successful bootstrap it stays running for
+   scheduled-task execs.
 4. Under **Scheduled Tasks**, click **+ Add New**:
    - Name: `fetch`
    - Command: `/usr/local/bin/fetch.sh`
    - Frequency: `0 */12 * * *` (every 12 hours — adjust to taste)
    - Container: `cert-consumer`
-5. Trigger it manually from the UI to populate the cert the first time.
-   Check execution history for output.
 
-The first run downloads the cert and writes it into the proxy's directory.
-Subsequent runs only do anything if the renewer has uploaded a new cert
-(compared by SHA-256 fingerprint).
+Subsequent scheduled-task runs only do anything if the renewer has
+uploaded a new cert (compared by SHA-256 fingerprint).
 
 ## IAM policy for the AWS credentials
 
@@ -94,6 +95,34 @@ so the proxy picks it up.
 If your Coolify installation uses a non-default path, override `CERT_OUT_DIR`
 and `DYNAMIC_OUT_DIR` via env vars, and adjust the volume mount accordingly.
 
+## Compatibility with the stock coolify-proxy config
+
+The default `coolify-proxy` compose that Coolify ships needs **no changes** to
+work with this consumer. The key bits that make it work out of the box:
+
+- Proxy bind-mounts `/data/coolify/proxy/:/traefik`, which is the same host
+  path this consumer writes to.
+- Proxy runs with `--providers.file.directory=/traefik/dynamic/` and
+  `--providers.file.watch=true`, so dropping a YAML into
+  `/data/coolify/proxy/dynamic/` is picked up automatically.
+- The dynamic YAML this consumer writes references `/traefik/certs/…` —
+  those are the in-proxy-container paths, which resolve via the existing
+  bind mount. Do not rewrite them to the consumer's view of the path.
+
+### Coexistence with per-host Let's Encrypt certs
+
+The stock proxy config keeps the `letsencrypt` HTTP-01 resolver enabled.
+That's fine — it only fires for routers that explicitly set
+`tls.certresolver=letsencrypt`. The wildcard this consumer installs is
+written as Traefik's `defaultCertificate`, so:
+
+- Existing services pinned to `letsencrypt` keep getting per-host certs.
+- New services that set `tls: true` with no resolver get served the
+  wildcard automatically.
+
+You can migrate services onto the wildcard at your own pace by removing
+their `certresolver` label.
+
 ## Verifying after first run
 
 SSH into the server and check:
@@ -121,6 +150,7 @@ and a `notAfter` date about 90 days in the future.
 - **S3 unreachable**: consumer exits non-zero. Coolify's Scheduled Tasks
   will log the failure. Not urgent on any single run — you have ~60 days
   of headroom before the cert expires.
-- **Consumer falls behind on new servers**: when spinning up a new server,
-  run the consumer once manually (or wait for the scheduled task) before
-  deploying any HTTPS services.
+- **Consumer bootstrap fails on a new server**: the container crashloops
+  instead of silently coming up with no cert. Check logs (`docker logs
+  cert-consumer`) for IAM, bucket, or network errors before deploying
+  HTTPS services on that server.

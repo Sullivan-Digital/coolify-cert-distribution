@@ -1,8 +1,9 @@
 # Deploy this as a Docker Compose resource in Coolify on EACH server that
 # runs a coolify-proxy (Traefik) instance that should serve the wildcard cert.
 #
-# This container stays running continuously (sleep infinity). The actual
-# fetch work is triggered by Coolify's Scheduled Tasks feature, which runs
+# On startup the container runs fetch.sh once to bootstrap the cert, then
+# stays running continuously (sleep infinity). Ongoing fetches are triggered
+# by Coolify's Scheduled Tasks feature, which runs
 # `docker exec cert-consumer /usr/local/bin/fetch.sh` on a cron.
 # See README for scheduled-task setup.
 #
@@ -43,4 +44,17 @@ services:
       # `docker restart coolify-proxy`. If you're using RELOAD_METHOD=touch
       # (recommended), you can remove this mount.
       - /var/run/docker.sock:/var/run/docker.sock
+    # Healthcheck fails if the local wildcard.crt is missing or expires
+    # within 14 days. Catches the silent-failure mode from the consumer
+    # side: fetch.sh has been broken long enough that the on-disk cert
+    # Traefik is serving is about to expire. Coolify surfaces unhealthy
+    # containers via its notifications.
+    # Note: on a fresh install the container will be unhealthy until
+    # the first fetch.sh run (README instructs to trigger it manually).
+    healthcheck:
+      test: ["CMD", "/usr/local/bin/healthcheck.sh"]
+      interval: 1h
+      timeout: 10s
+      start_period: 1m
+      retries: 3
     restart: unless-stopped

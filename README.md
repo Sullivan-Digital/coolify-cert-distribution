@@ -77,9 +77,10 @@ Each folder has its own README with deployment and IAM-policy details.
 6. Set `USE_STAGING=false`, delete the `lego_data` volume so lego forgets
    the staging account, re-trigger the task.
 7. Verify the production cert is in S3 (`aws s3 ls s3://BUCKET/certs/wildcard/`).
-8. Deploy the consumer on each proxy-serving VPS. Add its scheduled task:
-   command `/usr/local/bin/fetch.sh`, cron `0 */12 * * *`. Trigger manually
-   the first time.
+8. Deploy the consumer on each proxy-serving VPS. It runs `fetch.sh` once
+   at container start to bootstrap the cert (container will crashloop if
+   this fails — check logs and env vars). Then add its scheduled task:
+   command `/usr/local/bin/fetch.sh`, cron `0 */12 * * *`, for ongoing pulls.
 9. On each server, ensure the Coolify Traefik proxy is set up for file-based
    certs rather than ACME:
    a. Remove any `--certificatesresolvers...acme...` flags from the proxy
