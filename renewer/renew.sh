@@ -8,6 +8,18 @@
 #
 set -euo pipefail
 
+# --- Arguments --------------------------------------------------------------
+# --force: re-issue the cert from LE regardless of expiry, and upload to S3
+# regardless of whether the fingerprint matches. Useful for end-to-end testing.
+# Pair with USE_STAGING=true to avoid burning prod LE rate limits.
+FORCE=0
+for arg in "$@"; do
+    case "$arg" in
+        --force) FORCE=1 ;;
+        *) echo "Unknown argument: $arg" >&2; exit 2 ;;
+    esac
+done
+
 # --- Required environment ---------------------------------------------------
 : "${CERT_DOMAIN:?CERT_DOMAIN must be set (e.g. internal.example.com)}"
 : "${ACME_EMAIL:?ACME_EMAIL must be set}"
@@ -70,10 +82,15 @@ log "Renewer starting for domain: ${CERT_DOMAIN} (and *.${CERT_DOMAIN})"
 mapfile -t LEGO_ARGS < <(build_lego_args)
 
 if [[ -f "${CRT}" && -f "${KEY}" ]]; then
-    log "Existing cert found; attempting renewal (only acts if <${RENEW_DAYS} days remain)"
-    # 'renew' exits 0 whether or not it actually renewed. If the cert isn't due,
-    # it's a no-op and the file mtimes don't change.
-    lego "${LEGO_ARGS[@]}" renew --days "${RENEW_DAYS}" --no-random-sleep
+    if [[ "${FORCE}" == "1" ]]; then
+        log "Forcing renewal (--force): bypassing expiry check"
+        lego "${LEGO_ARGS[@]}" renew --days 9999 --no-random-sleep
+    else
+        log "Existing cert found; attempting renewal (only acts if <${RENEW_DAYS} days remain)"
+        # 'renew' exits 0 whether or not it actually renewed. If the cert isn't due,
+        # it's a no-op and the file mtimes don't change.
+        lego "${LEGO_ARGS[@]}" renew --days "${RENEW_DAYS}" --no-random-sleep
+    fi
 else
     log "No existing cert; requesting a fresh one"
     lego "${LEGO_ARGS[@]}" run
@@ -100,7 +117,9 @@ if aws s3api head-object \
         --region "${AWS_REGION}" 2>/dev/null || echo "")
 fi
 
-if [[ -n "${REMOTE_FINGERPRINT}" && "${REMOTE_FINGERPRINT}" == "${NEW_FINGERPRINT}" ]]; then
+if [[ "${FORCE}" == "1" ]]; then
+    log "Forcing upload (--force): bypassing remote fingerprint check"
+elif [[ -n "${REMOTE_FINGERPRINT}" && "${REMOTE_FINGERPRINT}" == "${NEW_FINGERPRINT}" ]]; then
     log "Remote fingerprint matches local. Nothing to upload. Done."
     exit 0
 fi
