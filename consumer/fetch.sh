@@ -1,45 +1,43 @@
 #!/usr/bin/env bash
 #
-# Cert consumer: polls S3 for cert changes and writes them to the local
-# Traefik dynamic config directory. Triggers a config-watch reload by
-# touching the dynamic YAML file (no container restart needed).
+# Cert consumer: polls S3 for each cert in FETCHED_CERTS (or every cert in the
+# SSM cert-mappings table if unset) and writes them to the local Traefik
+# dynamic config directory. Emits a single YAML with N entries in
+# tls.certificates[] and no defaultCertificate.
 #
-# Runs once and exits. Schedule via Coolify's Scheduled Tasks feature
-# to run every 24h (or more frequently if you want faster rollout).
+# Triggers a config-watch reload by touching the dynamic YAML file (no
+# container restart needed).
+#
+# Runs once and exits. Schedule via Coolify's Scheduled Tasks feature.
 #
 set -euo pipefail
 
-# --- Required environment ---------------------------------------------------
-: "${S3_BUCKET:?S3_BUCKET must be set}"
+# Source the shared helper. See renew.sh for the path rationale.
+# shellcheck source=lib/common.sh
+if [[ -r /usr/local/lib/cert-distribution/common.sh ]]; then
+    source /usr/local/lib/cert-distribution/common.sh
+else
+    source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
+fi
 
 # --- Optional environment ---------------------------------------------------
-# AWS credentials and region are optional on EC2: if unset, the AWS CLI falls
-# back to its default chain, which picks up the instance profile / IAM role
-# and the region from IMDS. Set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and
-# AWS_REGION explicitly only if you're running somewhere without IMDS.
+# AWS credentials and region are optional on EC2 (instance-profile + IMDS).
+# Set explicitly only if running somewhere without IMDS.
 
-S3_PREFIX="${S3_PREFIX:-certs/wildcard}"
+STACK_NAME="${STACK_NAME:-CertDistributionStack}"
 
-# Directory on the host where Coolify's Traefik expects cert files.
-# This path is the one mounted into coolify-proxy as /traefik/certs.
-# It's hard-coded by Coolify and documented in their custom-ssl-certs page.
+# Directory Coolify's Traefik reads certs from (host path, bind-mounted in).
 CERT_OUT_DIR="${CERT_OUT_DIR:-/host-coolify/proxy/certs}"
 
-# Directory for the Traefik dynamic YAML config.
+# Directory for Traefik's dynamic YAML config.
 DYNAMIC_OUT_DIR="${DYNAMIC_OUT_DIR:-/host-coolify/proxy/dynamic}"
 
-# Filenames Traefik reads.
-CRT_NAME="${CRT_NAME:-wildcard.crt}"
-KEY_NAME="${KEY_NAME:-wildcard.key}"
+# Filename of the dynamic config we write.
 DYNAMIC_NAME="${DYNAMIC_NAME:-wildcard-cert.yml}"
 
-# Whether to also restart the Traefik container if the cert changed.
-# "touch" (default) just touches the dynamic config file and relies on
-# Traefik's file-provider watch to reload. "restart" does a full container
-# restart (brief downtime, but absolutely guaranteed to pick up new cert).
+# Reload strategy: "touch" (default, uses Traefik's file-watch) or "restart"
+# (docker restart PROXY_CONTAINER) or "none".
 RELOAD_METHOD="${RELOAD_METHOD:-touch}"
-
-# Container name of the Coolify Traefik proxy. Only used if RELOAD_METHOD=restart.
 PROXY_CONTAINER="${PROXY_CONTAINER:-coolify-proxy}"
 
 # --- Setup ------------------------------------------------------------------
@@ -49,110 +47,194 @@ log() {
     echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] $*"
 }
 
-# --- Step 1: fetch remote fingerprint ---------------------------------------
-log "Consumer checking s3://${S3_BUCKET}/${S3_PREFIX}/ for cert updates"
+require_tools jq aws openssl || exit 1
 
-REMOTE_FINGERPRINT=$(aws s3 cp \
-    "s3://${S3_BUCKET}/${S3_PREFIX}/fingerprint.txt" - \
-    2>/dev/null || echo "")
+# --- Load SSM mappings + optional S3_BUCKET fallback ------------------------
+log "Loading cert→zone mappings from SSM (/${STACK_NAME}/certMappings)"
+MAPPINGS_JSON=$(load_ssm_mappings) || {
+    log "ERROR: could not read /${STACK_NAME}/certMappings from SSM"
+    exit 1
+}
 
-if [[ -z "${REMOTE_FINGERPRINT}" ]]; then
-    log "ERROR: could not fetch remote fingerprint. Is the bucket populated?"
+if [[ -z "${S3_BUCKET:-}" ]]; then
+    log "S3_BUCKET unset; reading /${STACK_NAME}/bucketName from SSM"
+    S3_BUCKET=$(load_ssm_bucket_name) || {
+        log "ERROR: S3_BUCKET unset and /${STACK_NAME}/bucketName lookup failed"
+        exit 1
+    }
+fi
+
+# --- Determine which certs to fetch -----------------------------------------
+# FETCHED_CERTS (if set) is authoritative; otherwise pull every cert from
+# the mappings. Entries in FETCHED_CERTS must match a mapping cert value
+# exactly (after normalisation) — no globbing.
+
+CERT_LIST=()
+if [[ -n "${FETCHED_CERTS:-}" ]]; then
+    for raw in $FETCHED_CERTS; do
+        c=$(normalize_domain "$raw")
+        [[ -z "$c" ]] && continue
+        # Confirm this cert is declared in SSM — otherwise it'd just 404 on S3.
+        in_map=$(printf '%s' "$MAPPINGS_JSON" | jq -r --arg c "$c" '
+            def norm: ascii_downcase | sub("\\.$"; "");
+            [ .[] | select((.cert | norm) == $c) ] | length
+        ')
+        if [[ "$in_map" == "0" ]]; then
+            log "ERROR: FETCHED_CERTS entry '${c}' not declared in SSM mappings"
+            exit 1
+        fi
+        CERT_LIST+=("$c")
+    done
+else
+    while IFS= read -r c; do
+        [[ -z "$c" ]] && continue
+        CERT_LIST+=("$c")
+    done < <(printf '%s' "$MAPPINGS_JSON" | jq -r '
+        def norm: ascii_downcase | sub("\\.$"; "");
+        .[].cert | norm
+    ')
+fi
+
+if (( ${#CERT_LIST[@]} == 0 )); then
+    log "ERROR: no certs to fetch (FETCHED_CERTS empty and mappings are empty)"
     exit 1
 fi
 
-log "Remote fingerprint: ${REMOTE_FINGERPRINT}"
+log "Fetching ${#CERT_LIST[@]} cert(s): ${CERT_LIST[*]}"
 
-# --- Step 2: compare against local ------------------------------------------
-LOCAL_FINGERPRINT=""
-if [[ -f "${CERT_OUT_DIR}/${CRT_NAME}" ]]; then
-    LOCAL_FINGERPRINT=$(openssl x509 -in "${CERT_OUT_DIR}/${CRT_NAME}" \
-        -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2 || echo "")
-fi
+# --- fetch_one: download + verify + install a single cert -------------------
+# $1 = cert domain (already normalised)
+# $2 = slug
+# $3 = S3 prefix (certs/<slug>)
+#
+# Returns 0 on success (cert is in place at ${CERT_OUT_DIR}/<slug>.{crt,key}).
+# Returns non-zero on any failure; caller aggregates into fail-fast behaviour.
+fetch_one() {
+    local cert="$1" slug="$2" s3_prefix="$3"
+    local crt_path="${CERT_OUT_DIR}/${slug}.crt"
+    local key_path="${CERT_OUT_DIR}/${slug}.key"
 
-if [[ "${LOCAL_FINGERPRINT}" == "${REMOTE_FINGERPRINT}" ]]; then
-    log "Local cert matches remote. Nothing to do."
-    exit 0
-fi
+    # 1. Fetch remote fingerprint.
+    local remote_fp
+    remote_fp=$(aws s3 cp "s3://${S3_BUCKET}/${s3_prefix}/fingerprint.txt" - 2>/dev/null) || {
+        log "  [${cert}] ERROR: could not fetch fingerprint.txt from ${s3_prefix}/"
+        return 1
+    }
+    if [[ -z "$remote_fp" ]]; then
+        log "  [${cert}] ERROR: remote fingerprint empty"
+        return 1
+    fi
 
-log "Cert changed (local: '${LOCAL_FINGERPRINT:-<none>}'). Fetching new one."
+    # 2. Compare against local cert (if present).
+    local local_fp=""
+    if [[ -f "$crt_path" ]]; then
+        local_fp=$(openssl x509 -in "$crt_path" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2 || echo "")
+    fi
 
-# --- Step 3: download atomically --------------------------------------------
-# Download to a staging location, then move into place. Prevents Traefik from
-# ever reading half-written files if it happens to scan mid-download.
-STAGING=$(mktemp -d)
-trap 'rm -rf "${STAGING}"' EXIT
+    if [[ "$local_fp" == "$remote_fp" ]]; then
+        log "  [${cert}] local matches remote (${remote_fp}); no-op"
+        return 0
+    fi
 
-aws s3 cp "s3://${S3_BUCKET}/${S3_PREFIX}/wildcard.crt" "${STAGING}/crt" \
-    --only-show-errors
-aws s3 cp "s3://${S3_BUCKET}/${S3_PREFIX}/wildcard.key" "${STAGING}/key" \
-    --only-show-errors
+    log "  [${cert}] fingerprint differs (local: '${local_fp:-<none>}'); downloading"
 
-# Verify the downloaded cert matches the fingerprint we saw.
-# Protects against partial/corrupt downloads and against the rare race
-# where the fingerprint file is updated between our read and the cert read.
-DOWNLOADED_FINGERPRINT=$(openssl x509 -in "${STAGING}/crt" \
-    -noout -fingerprint -sha256 | cut -d= -f2)
-if [[ "${DOWNLOADED_FINGERPRINT}" != "${REMOTE_FINGERPRINT}" ]]; then
-    log "ERROR: downloaded cert fingerprint '${DOWNLOADED_FINGERPRINT}' does not match advertised '${REMOTE_FINGERPRINT}'. Aborting."
-    exit 1
-fi
+    # 3. Download to staging dir.
+    local staging
+    staging=$(mktemp -d) || return 1
+    # shellcheck disable=SC2064
+    trap "rm -rf '${staging}'" RETURN
 
-# Verify key and cert actually match each other.
-CRT_MODULUS=$(openssl x509 -in "${STAGING}/crt" -noout -modulus | openssl sha256)
-KEY_MODULUS=$(openssl rsa -in "${STAGING}/key" -noout -modulus 2>/dev/null | openssl sha256 || \
-              openssl pkey -in "${STAGING}/key" -pubout 2>/dev/null | openssl sha256)
-# Note: modulus check only works for RSA. For EC keys we just trust they're paired
-# (lego writes them together and an unpaired key would fail TLS handshake anyway).
-if openssl rsa -in "${STAGING}/key" -noout -check 2>/dev/null; then
-    if [[ "${CRT_MODULUS}" != "${KEY_MODULUS}" ]]; then
-        log "ERROR: downloaded cert and key do not match. Aborting."
+    aws s3 cp "s3://${S3_BUCKET}/${s3_prefix}/cert.crt" "${staging}/crt" --only-show-errors || {
+        log "  [${cert}] ERROR: download of cert.crt failed"
+        return 1
+    }
+    aws s3 cp "s3://${S3_BUCKET}/${s3_prefix}/cert.key" "${staging}/key" --only-show-errors || {
+        log "  [${cert}] ERROR: download of cert.key failed"
+        return 1
+    }
+
+    # 4. Verify downloaded fingerprint matches advertised.
+    local downloaded_fp
+    downloaded_fp=$(openssl x509 -in "${staging}/crt" -noout -fingerprint -sha256 2>/dev/null | cut -d= -f2) || {
+        log "  [${cert}] ERROR: could not read downloaded cert"
+        return 1
+    }
+    if [[ "$downloaded_fp" != "$remote_fp" ]]; then
+        log "  [${cert}] ERROR: downloaded fingerprint '${downloaded_fp}' != advertised '${remote_fp}'"
+        return 1
+    fi
+
+    # 5. Verify key/cert pair (RSA only; EC trusted-by-convention).
+    if openssl rsa -in "${staging}/key" -noout -check 2>/dev/null; then
+        local crt_mod key_mod
+        crt_mod=$(openssl x509 -in "${staging}/crt" -noout -modulus | openssl sha256) || return 1
+        key_mod=$(openssl rsa -in "${staging}/key" -noout -modulus 2>/dev/null | openssl sha256) || return 1
+        if [[ "$crt_mod" != "$key_mod" ]]; then
+            log "  [${cert}] ERROR: cert and key moduli differ (mismatched pair)"
+            return 1
+        fi
+    fi
+
+    # 6. Atomic move into place.
+    mv -f "${staging}/crt" "${crt_path}.new" || return 1
+    mv -f "${staging}/key" "${key_path}.new" || return 1
+    chmod 644 "${crt_path}.new" || return 1
+    chmod 600 "${key_path}.new" || return 1
+    mv -f "${crt_path}.new" "${crt_path}" || return 1
+    mv -f "${key_path}.new" "${key_path}" || return 1
+
+    log "  [${cert}] installed"
+    return 0
+}
+
+# --- Main loop (fail-fast) --------------------------------------------------
+declare -a SLUGS=()
+declare -a CERTS=()
+
+for cert in "${CERT_LIST[@]}"; do
+    slug=$(slug_for "$cert")
+    s3_prefix="certs/${slug}"
+    log "Fetching ${cert} from s3://${S3_BUCKET}/${s3_prefix}/"
+
+    if ! fetch_one "$cert" "$slug" "$s3_prefix"; then
+        log "ERROR: fetch of '${cert}' failed — aborting"
         exit 1
     fi
-fi
+    SLUGS+=("$slug")
+    CERTS+=("$cert")
+done
 
-# --- Step 4: atomically move into place -------------------------------------
-mv -f "${STAGING}/crt" "${CERT_OUT_DIR}/${CRT_NAME}.new"
-mv -f "${STAGING}/key" "${CERT_OUT_DIR}/${KEY_NAME}.new"
-chmod 600 "${CERT_OUT_DIR}/${KEY_NAME}.new"
-chmod 644 "${CERT_OUT_DIR}/${CRT_NAME}.new"
-mv -f "${CERT_OUT_DIR}/${CRT_NAME}.new" "${CERT_OUT_DIR}/${CRT_NAME}"
-mv -f "${CERT_OUT_DIR}/${KEY_NAME}.new" "${CERT_OUT_DIR}/${KEY_NAME}"
-
-# --- Step 5: ensure the dynamic config references the cert ------------------
-# The paths here use /traefik — that's the in-container path inside
-# coolify-proxy where /data/coolify/proxy is mounted. Do NOT change these
-# to match CERT_OUT_DIR (which is the host path from the consumer's view).
+# --- Regenerate the Traefik dynamic YAML ------------------------------------
+# One YAML containing every loaded cert. No defaultCertificate — Traefik only
+# picks the default for SNIs that match nothing loaded, and in that case no
+# cert we hold would match anyway (browser sees a warning either way).
 DYNAMIC_PATH="${DYNAMIC_OUT_DIR}/${DYNAMIC_NAME}"
-cat > "${DYNAMIC_PATH}.new" <<EOF
-# Managed by cert-consumer — do not edit by hand.
-tls:
-  certificates:
-    - certFile: /traefik/certs/${CRT_NAME}
-      keyFile: /traefik/certs/${KEY_NAME}
-  stores:
-    default:
-      defaultCertificate:
-        certFile: /traefik/certs/${CRT_NAME}
-        keyFile: /traefik/certs/${KEY_NAME}
-EOF
-mv -f "${DYNAMIC_PATH}.new" "${DYNAMIC_PATH}"
+TMP_YAML="${DYNAMIC_PATH}.new"
 
-# --- Step 6: trigger Traefik reload -----------------------------------------
+{
+    echo "# Managed by cert-consumer — do not edit by hand."
+    echo "tls:"
+    echo "  certificates:"
+    for slug in "${SLUGS[@]}"; do
+        echo "    - certFile: /traefik/certs/${slug}.crt"
+        echo "      keyFile:  /traefik/certs/${slug}.key"
+    done
+} > "$TMP_YAML"
+
+mv -f "$TMP_YAML" "$DYNAMIC_PATH"
+
+# --- Trigger reload ---------------------------------------------------------
 case "${RELOAD_METHOD}" in
     touch)
-        # Traefik's file provider (providers.file.watch=true) reacts to mtime
-        # changes on the dynamic config file. A plain touch is enough to make
-        # it re-scan and re-load certs. No connection drops.
         touch "${DYNAMIC_PATH}"
-        log "Touched ${DYNAMIC_PATH} to trigger Traefik config watch reload"
+        log "Touched ${DYNAMIC_PATH} to trigger Traefik reload"
         ;;
     restart)
         if command -v docker >/dev/null 2>&1 && [[ -S /var/run/docker.sock ]]; then
             log "Restarting ${PROXY_CONTAINER}"
             docker restart "${PROXY_CONTAINER}" >/dev/null
         else
-            log "WARNING: RELOAD_METHOD=restart but docker socket not available. Falling back to touch."
+            log "WARNING: RELOAD_METHOD=restart but docker socket not available; falling back to touch"
             touch "${DYNAMIC_PATH}"
         fi
         ;;
@@ -160,12 +242,17 @@ case "${RELOAD_METHOD}" in
         log "RELOAD_METHOD=none; skipping reload step"
         ;;
     *)
-        log "Unknown RELOAD_METHOD='${RELOAD_METHOD}'. Defaulting to touch."
+        log "Unknown RELOAD_METHOD='${RELOAD_METHOD}'; defaulting to touch"
         touch "${DYNAMIC_PATH}"
         ;;
 esac
 
-# --- Step 7: log the new cert's expiry for monitoring -----------------------
-NOT_AFTER=$(openssl x509 -in "${CERT_OUT_DIR}/${CRT_NAME}" -noout -enddate | cut -d= -f2)
-log "Cert installed. Expires: ${NOT_AFTER}"
+# --- Expiry summary ---------------------------------------------------------
+for i in "${!CERTS[@]}"; do
+    cert="${CERTS[$i]}"
+    slug="${SLUGS[$i]}"
+    crt_path="${CERT_OUT_DIR}/${slug}.crt"
+    not_after=$(openssl x509 -in "$crt_path" -noout -enddate 2>/dev/null | cut -d= -f2 || echo "unknown")
+    log "  ${cert}: expires ${not_after}"
+done
 log "Done."

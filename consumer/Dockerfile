@@ -12,6 +12,7 @@ RUN apk add --no-cache \
         openssl \
         docker-cli
 
+COPY lib/common.sh /usr/local/lib/cert-distribution/common.sh
 COPY fetch.sh /usr/local/bin/fetch.sh
 COPY healthcheck.sh /usr/local/bin/healthcheck.sh
 COPY entrypoint.sh /usr/local/bin/entrypoint.sh

@@ -1,26 +1,36 @@
 # Deploy this as a Docker Compose resource in Coolify on EACH server that
-# runs a coolify-proxy (Traefik) instance that should serve the wildcard cert.
+# runs a coolify-proxy (Traefik) instance that should serve the distributed
+# certs.
 #
-# On startup the container runs fetch.sh once to bootstrap the cert, then
+# On startup the container runs fetch.sh once to bootstrap the certs, then
 # stays running continuously (sleep infinity). Ongoing fetches are triggered
 # by Coolify's Scheduled Tasks feature, which runs
 # `docker exec cert-consumer /usr/local/bin/fetch.sh` on a cron.
 # See README for scheduled-task setup.
 #
-# Required environment variables (set in Coolify's UI):
-#   S3_BUCKET                 same bucket as the renewer writes to
+# Required environment variables: none — the consumer discovers everything
+# from SSM. On EC2 with an instance role attached, deploy with no env vars
+# and it just works.
 #
 # Optional:
-#   AWS_REGION                e.g. ap-southeast-2. On EC2 the AWS CLI reads
-#                             the region from IMDS automatically; set this
-#                             only if running somewhere without IMDS.
-#   AWS_ACCESS_KEY_ID         IAM user with READ-ONLY access to the cert bucket.
-#   AWS_SECRET_ACCESS_KEY     Omit both when running on EC2 with an instance
-#                             role attached — the AWS CLI will pick up creds
-#                             from IMDS automatically.
-#   S3_PREFIX                 default: certs/wildcard
-#   RELOAD_METHOD             touch (default) | restart | none
-#   PROXY_CONTAINER           default: coolify-proxy (only used if RELOAD_METHOD=restart)
+#   STACK_NAME          CDK stack name for SSM parameter paths. Default:
+#                       CertDistributionStack. Match whatever you deployed.
+#   FETCHED_CERTS       whitespace-separated list of cert domains to fetch.
+#                       Each entry must match exactly a cert value in the SSM
+#                       mappings (no globbing — if you want *.foo.com, list
+#                       the literal string "*.foo.com"). Default: fetch every
+#                       cert in the mapping table.
+#   S3_BUCKET           bucket name. Optional: if unset, read from
+#                       /${STACK_NAME}/bucketName in SSM.
+#   AWS_REGION          on EC2 the AWS CLI reads the region from IMDS
+#                       automatically; set this only if running without IMDS.
+#   AWS_ACCESS_KEY_ID   omit on EC2 with an instance role — the AWS CLI picks
+#   AWS_SECRET_ACCESS_KEY   up creds from IMDS automatically.
+#   RELOAD_METHOD       touch (default) | restart | none
+#   PROXY_CONTAINER     default: coolify-proxy (only used if RELOAD_METHOD=restart)
+#
+# Upgrade note: earlier versions of this container read `S3_PREFIX`; it is
+# silently ignored now. Safe to remove from Coolify env on existing deploys.
 
 services:
   cert-consumer:
@@ -30,11 +40,12 @@ services:
     image: cert-consumer:latest
     container_name: cert-consumer
     environment:
+      - STACK_NAME
+      - FETCHED_CERTS
+      - S3_BUCKET
       - AWS_ACCESS_KEY_ID
       - AWS_SECRET_ACCESS_KEY
       - AWS_REGION
-      - S3_BUCKET
-      - S3_PREFIX
       - RELOAD_METHOD
       - PROXY_CONTAINER
     volumes:
@@ -42,17 +53,14 @@ services:
       # to the same location that coolify-proxy reads from. Inside the
       # container this appears at /host-coolify/proxy.
       - /data/coolify/proxy:/host-coolify/proxy
-      # Required only if RELOAD_METHOD=restart: lets the container run
-      # `docker restart coolify-proxy`. If you're using RELOAD_METHOD=touch
-      # (recommended), you can remove this mount.
+      # Required only if RELOAD_METHOD=restart. If you're using the default
+      # RELOAD_METHOD=touch, you can remove this mount.
       - /var/run/docker.sock:/var/run/docker.sock
-    # Healthcheck fails if the local wildcard.crt is missing or expires
-    # within 14 days. Catches the silent-failure mode from the consumer
-    # side: fetch.sh has been broken long enough that the on-disk cert
-    # Traefik is serving is about to expire. Coolify surfaces unhealthy
-    # containers via its notifications.
-    # Note: on a fresh install the container will be unhealthy until
-    # the first fetch.sh run (README instructs to trigger it manually).
+    # Healthcheck iterates the expected cert set (FETCHED_CERTS if set, else
+    # every cert in the SSM mappings) and fails if any expected cert is
+    # missing on disk or expires within 14 days. Note: on a fresh install
+    # the container will be unhealthy until the first fetch.sh run —
+    # entrypoint.sh runs fetch.sh once at startup to avoid that.
     healthcheck:
       test: ["CMD", "/usr/local/bin/healthcheck.sh"]
       interval: 1h

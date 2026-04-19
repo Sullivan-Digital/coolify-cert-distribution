@@ -2,44 +2,75 @@
 #
 # Docker healthcheck for the renewer.
 #
-# Reads metadata.json from S3 and fails if not_after is less than WARN_DAYS
-# away, or if the object is missing/unreadable. Coolify surfaces the
-# unhealthy state via its notification channels.
+# For each cert in MANAGED_CERTS, reads metadata.json from S3 and fails if
+# any cert's not_after is less than WARN_DAYS away, or if any metadata is
+# missing/unreadable. Coolify surfaces the unhealthy state via its
+# notification channels.
 #
-# This catches the silent-failure mode called out in the README: renewer
-# scheduled task has been broken long enough that the cert in S3 is about
-# to expire.
+# Catches the silent-failure mode: the renewer's scheduled task has been
+# broken long enough that a cert in S3 is about to expire.
 #
 set -euo pipefail
 
-: "${S3_BUCKET:?S3_BUCKET must be set}"
+# shellcheck source=lib/common.sh
+if [[ -r /usr/local/lib/cert-distribution/common.sh ]]; then
+    source /usr/local/lib/cert-distribution/common.sh
+else
+    source "$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)/lib/common.sh"
+fi
 
-S3_PREFIX="${S3_PREFIX:-certs/wildcard}"
+: "${MANAGED_CERTS:?MANAGED_CERTS must be set}"
+
+STACK_NAME="${STACK_NAME:-CertDistributionStack}"
 WARN_DAYS="${HEALTHCHECK_WARN_DAYS:-14}"
 
-META=$(aws s3 cp "s3://${S3_BUCKET}/${S3_PREFIX}/metadata.json" - \
-    2>/dev/null) || {
-    echo "UNHEALTHY: could not fetch metadata.json from s3://${S3_BUCKET}/${S3_PREFIX}/" >&2
-    exit 1
-}
-
-NOT_AFTER=$(echo "${META}" | jq -r '.not_after // empty')
-if [[ -z "${NOT_AFTER}" ]]; then
-    echo "UNHEALTHY: metadata.json missing not_after field" >&2
-    exit 1
+if [[ -z "${S3_BUCKET:-}" ]]; then
+    S3_BUCKET=$(load_ssm_bucket_name) || {
+        echo "UNHEALTHY: S3_BUCKET unset and /${STACK_NAME}/bucketName lookup failed" >&2
+        exit 1
+    }
 fi
-
-EXPIRY_EPOCH=$(date -u -d "${NOT_AFTER}" +%s 2>/dev/null) || {
-    echo "UNHEALTHY: could not parse not_after='${NOT_AFTER}'" >&2
-    exit 1
-}
 
 NOW_EPOCH=$(date -u +%s)
-DAYS_LEFT=$(( (EXPIRY_EPOCH - NOW_EPOCH) / 86400 ))
+FAIL=0
+SUMMARY=()
 
-if (( DAYS_LEFT < WARN_DAYS )); then
-    echo "UNHEALTHY: cert in S3 expires in ${DAYS_LEFT} days (threshold: ${WARN_DAYS})" >&2
+for raw_cert in $MANAGED_CERTS; do
+    cert=$(normalize_domain "$raw_cert")
+    [[ -z "$cert" ]] && continue
+
+    slug=$(slug_for "$cert")
+    meta=$(aws s3 cp "s3://${S3_BUCKET}/certs/${slug}/metadata.json" - 2>/dev/null) || {
+        echo "UNHEALTHY: could not fetch metadata for '${cert}' (s3://${S3_BUCKET}/certs/${slug}/metadata.json)" >&2
+        FAIL=1
+        continue
+    }
+
+    not_after=$(echo "$meta" | jq -r '.not_after // empty')
+    if [[ -z "$not_after" ]]; then
+        echo "UNHEALTHY: metadata for '${cert}' missing not_after field" >&2
+        FAIL=1
+        continue
+    fi
+
+    expiry_epoch=$(date -u -d "$not_after" +%s 2>/dev/null) || {
+        echo "UNHEALTHY: could not parse not_after='${not_after}' for '${cert}'" >&2
+        FAIL=1
+        continue
+    }
+
+    days_left=$(( (expiry_epoch - NOW_EPOCH) / 86400 ))
+    SUMMARY+=("${cert}: ${days_left}d")
+
+    if (( days_left < WARN_DAYS )); then
+        echo "UNHEALTHY: '${cert}' expires in ${days_left} days (threshold: ${WARN_DAYS})" >&2
+        FAIL=1
+    fi
+done
+
+if (( FAIL )); then
+    echo "Summary: ${SUMMARY[*]}" >&2
     exit 1
 fi
 
-echo "OK: cert in S3 expires in ${DAYS_LEFT} days"
+echo "OK: ${SUMMARY[*]} (threshold: ${WARN_DAYS}d)"

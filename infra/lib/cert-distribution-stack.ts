@@ -3,14 +3,19 @@ import { Construct } from 'constructs';
 import * as iam from 'aws-cdk-lib/aws-iam';
 import * as route53 from 'aws-cdk-lib/aws-route53';
 import * as s3 from 'aws-cdk-lib/aws-s3';
+import * as ssm from 'aws-cdk-lib/aws-ssm';
+
+export interface CertConfig {
+  /** Cert pattern (e.g. *.foo.com or coolify.foo.com). Lowercase, no trailing dot. */
+  readonly cert: string;
+  /** Route 53 hosted zone name (e.g. foo.com). Lowercase, no trailing dot. */
+  readonly zone: string;
+}
 
 export interface CertDistributionStackProps extends cdk.StackProps {
-  /** Route 53 hosted zone name (e.g. example.com) — looked up, not created. */
-  readonly zoneName: string;
-  /** Cert apex domain (e.g. internal.example.com). Used for the ACME
-   *  challenge scoping: _acme-challenge.<certDomain>. */
-  readonly certDomain: string;
-  /** Key prefix inside the bucket. Must match S3_PREFIX in the scripts. */
+  /** Cert→zone permission grants. See CertConfig. */
+  readonly certs: CertConfig[];
+  /** Key prefix inside the bucket. Each cert lives at <s3Prefix>/<slug>/. */
   readonly s3Prefix?: string;
 }
 
@@ -18,12 +23,9 @@ export class CertDistributionStack extends cdk.Stack {
   constructor(scope: Construct, id: string, props: CertDistributionStackProps) {
     super(scope, id, props);
 
-    const s3Prefix = props.s3Prefix ?? 'certs/wildcard';
+    const s3Prefix = props.s3Prefix ?? 'certs';
 
     // --- S3 bucket --------------------------------------------------------
-    // Block-all-public-access + SSE-S3 are the defaults for Bucket in CDK.
-    // Versioning off per project choice; RETAIN so cert history survives
-    // stack deletion.
     const bucket = new s3.Bucket(this, 'CertBucket', {
       encryption: s3.BucketEncryption.S3_MANAGED,
       blockPublicAccess: s3.BlockPublicAccess.BLOCK_ALL,
@@ -31,53 +33,115 @@ export class CertDistributionStack extends cdk.Stack {
       removalPolicy: cdk.RemovalPolicy.RETAIN,
     });
 
-    // Convenience ARNs used by both roles.
     const prefixObjectsArn = bucket.arnForObjects(`${s3Prefix}/*`);
 
-    // --- Route 53 lookup --------------------------------------------------
-    // Looked up at synth time; result is cached in cdk.context.json.
-    const hostedZone = route53.HostedZone.fromLookup(this, 'HostedZone', {
-      domainName: props.zoneName,
-    });
+    // --- Route 53 lookups -------------------------------------------------
+    // One fromLookup per *unique* zone (cached in cdk.context.json after the
+    // first synth).
+    const uniqueZones = Array.from(new Set(props.certs.map((c) => c.zone)));
+    const hostedZoneMap = new Map<string, route53.IHostedZone>();
+    for (const zoneName of uniqueZones) {
+      hostedZoneMap.set(
+        zoneName,
+        route53.HostedZone.fromLookup(this, `HostedZone_${slugify(zoneName)}`, {
+          domainName: zoneName,
+        }),
+      );
+    }
 
-    // --- Renewer managed policy -------------------------------------------
-    // Standalone managed policy so it can be attached to any EC2 instance
-    // role that runs a cert-renewer container, without having to re-declare
-    // the permissions. Mirrors the least-privilege policy in renewer/README.md.
-    const renewerPolicy = new iam.ManagedPolicy(this, 'RenewerPolicy', {
-      description: 'Cert-renewer permissions: Route53 DNS-01 + S3 cert write',
-      statements: [
+    // --- Renewer policy ---------------------------------------------------
+    // Global Route 53 plumbing (same as before).
+    const route53GlobalStatements = [
+      new iam.PolicyStatement({
+        sid: 'Route53AcmeChallenge',
+        actions: ['route53:GetChange'],
+        resources: ['arn:aws:route53:::change/*'],
+      }),
+      new iam.PolicyStatement({
+        sid: 'Route53ListZones',
+        actions: ['route53:ListHostedZonesByName'],
+        resources: ['*'],
+      }),
+    ];
+
+    // One ListResourceRecordSets statement per zone.
+    const route53ReadStatements = uniqueZones.map(
+      (zoneName) =>
         new iam.PolicyStatement({
-          sid: 'Route53AcmeChallenge',
-          actions: ['route53:GetChange'],
-          resources: ['arn:aws:route53:::change/*'],
-        }),
-        new iam.PolicyStatement({
-          sid: 'Route53ListZones',
-          actions: ['route53:ListHostedZonesByName'],
-          resources: ['*'],
-        }),
-        new iam.PolicyStatement({
-          sid: 'Route53ReadZone',
+          sid: `Route53ReadZone${slugifyForSid(zoneName)}`,
           actions: ['route53:ListResourceRecordSets'],
-          resources: [hostedZone.hostedZoneArn],
+          resources: [hostedZoneMap.get(zoneName)!.hostedZoneArn],
         }),
-        // Scope writes to the single _acme-challenge TXT record for certDomain.
-        // If this policy leaks onto a role that's then compromised, the attacker
-        // still can't rewrite MX/A/other records.
-        new iam.PolicyStatement({
-          sid: 'Route53WriteChallengeOnly',
+    );
+
+    // One ChangeResourceRecordSets statement per zone, with
+    // ForAllValues:StringLike and expanded _acme-challenge.* record names.
+    const certsByZone = new Map<string, CertConfig[]>();
+    for (const c of props.certs) {
+      const list = certsByZone.get(c.zone) ?? [];
+      list.push(c);
+      certsByZone.set(c.zone, list);
+    }
+
+    const route53WriteStatements = Array.from(certsByZone.entries()).map(
+      ([zoneName, certsInZone]) => {
+        const recordNames: string[] = [];
+        for (const c of certsInZone) {
+          if (c.cert.startsWith('*.')) {
+            // Bare domain (lets us issue foo.com alongside *.foo.com).
+            recordNames.push(`_acme-challenge.${c.cert.slice(2)}`);
+            // Wildcard form (StringLike matches descendants at any depth).
+            recordNames.push(`_acme-challenge.${c.cert}`);
+          } else {
+            recordNames.push(`_acme-challenge.${c.cert}`);
+          }
+        }
+        // De-dupe in case two certs in the same zone expand to the same name.
+        const dedupedRecordNames = Array.from(new Set(recordNames));
+        return new iam.PolicyStatement({
+          sid: `Route53Write${slugifyForSid(zoneName)}`,
           actions: ['route53:ChangeResourceRecordSets'],
-          resources: [hostedZone.hostedZoneArn],
+          resources: [hostedZoneMap.get(zoneName)!.hostedZoneArn],
           conditions: {
-            'ForAllValues:StringEquals': {
-              'route53:ChangeResourceRecordSetsNormalizedRecordNames': [
-                `_acme-challenge.${props.certDomain}`,
-              ],
+            'ForAllValues:StringLike': {
+              'route53:ChangeResourceRecordSetsNormalizedRecordNames': dedupedRecordNames,
               'route53:ChangeResourceRecordSetsRecordTypes': ['TXT'],
             },
           },
-        }),
+        });
+      },
+    );
+
+    // --- SSM parameters (runtime discovery) -------------------------------
+    // Renewer + consumer read these at startup to find the bucket and the
+    // cert→zone mapping table.
+    const bucketNameParam = new ssm.StringParameter(this, 'BucketNameParam', {
+      parameterName: `/${this.stackName}/bucketName`,
+      description: 'S3 bucket holding the distributed certs (cert-distribution).',
+      stringValue: bucket.bucketName,
+      tier: ssm.ParameterTier.STANDARD,
+    });
+
+    const certMappingsParam = new ssm.StringParameter(this, 'CertMappingsParam', {
+      parameterName: `/${this.stackName}/certMappings`,
+      description: 'JSON array of { cert, zone } mappings (cert-distribution).',
+      stringValue: JSON.stringify(props.certs),
+      tier: ssm.ParameterTier.STANDARD,
+    });
+
+    const ssmReadStatement = new iam.PolicyStatement({
+      sid: 'SsmReadCertMappings',
+      actions: ['ssm:GetParameter'],
+      resources: [bucketNameParam.parameterArn, certMappingsParam.parameterArn],
+    });
+
+    // --- Renewer managed policy -------------------------------------------
+    const renewerPolicy = new iam.ManagedPolicy(this, 'RenewerPolicy', {
+      description: 'Cert-renewer permissions: Route53 DNS-01 + S3 cert write',
+      statements: [
+        ...route53GlobalStatements,
+        ...route53ReadStatements,
+        ...route53WriteStatements,
         new iam.PolicyStatement({
           sid: 'S3WriteCerts',
           actions: [
@@ -96,12 +160,11 @@ export class CertDistributionStack extends cdk.Stack {
             StringLike: { 's3:prefix': [`${s3Prefix}/*`] },
           },
         }),
+        ssmReadStatement,
       ],
     });
 
     // --- Consumer managed policy ------------------------------------------
-    // Attach to any EC2 instance role that runs a cert-consumer container.
-    // Read-only access to the cert prefix. Mirrors consumer/README.md.
     const consumerPolicy = new iam.ManagedPolicy(this, 'ConsumerPolicy', {
       description: 'Cert-consumer permissions: read-only S3 cert prefix',
       statements: [
@@ -118,13 +181,11 @@ export class CertDistributionStack extends cdk.Stack {
             StringLike: { 's3:prefix': [`${s3Prefix}/*`] },
           },
         }),
+        ssmReadStatement,
       ],
     });
 
     // --- Default roles ----------------------------------------------------
-    // Convenience roles pre-attached to the managed policies above, for the
-    // common case of one renewer host and one initial consumer host. For
-    // additional servers, mint your own role and attach the managed policy.
     const renewerRole = new iam.Role(this, 'RenewerRole', {
       assumedBy: new iam.ServicePrincipal('ec2.amazonaws.com'),
       description: 'Default instance role for cert-renewer',
@@ -138,10 +199,6 @@ export class CertDistributionStack extends cdk.Stack {
     });
 
     // --- Instance profiles ------------------------------------------------
-    // CDK creates these implicitly when you pass a role to ec2.Instance, but
-    // since the EC2 hosts are provisioned outside this stack (Coolify), we
-    // emit the profiles explicitly so they can be attached via the console
-    // or a launch template.
     const renewerProfile = new iam.CfnInstanceProfile(this, 'RenewerInstanceProfile', {
       roles: [renewerRole.roleName],
     });
@@ -153,9 +210,18 @@ export class CertDistributionStack extends cdk.Stack {
     // --- Outputs ----------------------------------------------------------
     new cdk.CfnOutput(this, 'BucketName', {
       value: bucket.bucketName,
-      description: 'Set this as S3_BUCKET on both renewer and consumer.',
+      description: 'S3 bucket name (also published at /<stack>/bucketName in SSM).',
     });
     new cdk.CfnOutput(this, 'BucketArn', { value: bucket.bucketArn });
+
+    new cdk.CfnOutput(this, 'BucketNameParamName', {
+      value: bucketNameParam.parameterName,
+      description: 'SSM parameter that publishes the bucket name.',
+    });
+    new cdk.CfnOutput(this, 'CertMappingsParamName', {
+      value: certMappingsParam.parameterName,
+      description: 'SSM parameter that publishes the cert→zone mappings JSON.',
+    });
 
     new cdk.CfnOutput(this, 'RenewerPolicyArn', {
       value: renewerPolicy.managedPolicyArn,
@@ -176,10 +242,16 @@ export class CertDistributionStack extends cdk.Stack {
       value: consumerProfile.ref,
       description: 'Default instance profile for a cert-consumer host.',
     });
-
-    new cdk.CfnOutput(this, 'HostedZoneId', {
-      value: hostedZone.hostedZoneId,
-      description: 'Set this as AWS_HOSTED_ZONE_ID on the renewer.',
-    });
   }
+}
+
+// For CDK construct IDs: replace anything non-alphanumeric with an underscore.
+function slugify(s: string): string {
+  return s.replace(/[^A-Za-z0-9]/g, '_');
+}
+
+// For IAM statement Sids: alphanumerics only, no underscores (AWS requires
+// Sid to match [A-Za-z0-9]).
+function slugifyForSid(s: string): string {
+  return s.replace(/[^A-Za-z0-9]/g, '');
 }
