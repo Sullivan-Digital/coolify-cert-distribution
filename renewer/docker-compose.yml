@@ -8,11 +8,15 @@
 # Required environment variables (set these in Coolify's UI, not here):
 #   CERT_DOMAIN               e.g. internal.sullivandigital.com.au
 #   ACME_EMAIL                contact for Let's Encrypt
-#   AWS_REGION                e.g. ap-southeast-2
 #   AWS_HOSTED_ZONE_ID        Route 53 zone id for the parent domain
 #   S3_BUCKET                 bucket name that holds the cert
 #
 # Optional:
+#   AWS_REGION                e.g. ap-southeast-2. On EC2 the AWS CLI (and
+#                             lego) read the region from IMDS automatically;
+#                             set this only if running somewhere without IMDS.
+#                             Route 53 itself is global, so this only affects
+#                             the S3 uploads.
 #   AWS_ACCESS_KEY_ID         IAM user with Route 53 + S3 permissions.
 #   AWS_SECRET_ACCESS_KEY     Omit both when running on EC2 with an instance
 #                             role attached — lego and the AWS CLI both pick

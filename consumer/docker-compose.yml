@@ -8,10 +8,12 @@
 # See README for scheduled-task setup.
 #
 # Required environment variables (set in Coolify's UI):
-#   AWS_REGION                e.g. ap-southeast-2
 #   S3_BUCKET                 same bucket as the renewer writes to
 #
 # Optional:
+#   AWS_REGION                e.g. ap-southeast-2. On EC2 the AWS CLI reads
+#                             the region from IMDS automatically; set this
+#                             only if running somewhere without IMDS.
 #   AWS_ACCESS_KEY_ID         IAM user with READ-ONLY access to the cert bucket.
 #   AWS_SECRET_ACCESS_KEY     Omit both when running on EC2 with an instance
 #                             role attached — the AWS CLI will pick up creds

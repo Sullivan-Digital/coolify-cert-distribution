@@ -23,15 +23,16 @@ done
 # --- Required environment ---------------------------------------------------
 : "${CERT_DOMAIN:?CERT_DOMAIN must be set (e.g. internal.example.com)}"
 : "${ACME_EMAIL:?ACME_EMAIL must be set}"
-: "${AWS_REGION:?AWS_REGION must be set (e.g. ap-southeast-2)}"
 : "${AWS_HOSTED_ZONE_ID:?AWS_HOSTED_ZONE_ID must be set (Route 53 zone id)}"
 : "${S3_BUCKET:?S3_BUCKET must be set (e.g. my-certs-bucket)}"
 
 # --- Optional environment ---------------------------------------------------
-# AWS credentials are optional: if unset, both lego and the AWS CLI fall back
-# to the default credential chain, which picks up the EC2 instance profile /
-# IAM role attached to the host. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
-# explicitly only if you're running somewhere without an instance role.
+# AWS credentials and region are optional on EC2: if unset, both lego and the
+# AWS CLI fall back to their default chain, which picks up the instance
+# profile / IAM role and the region from IMDS. Set AWS_ACCESS_KEY_ID,
+# AWS_SECRET_ACCESS_KEY, and AWS_REGION explicitly only if you're running
+# somewhere without IMDS. (Route 53 itself is a global service, so the region
+# only matters for the S3 uploads here.)
 
 # Key prefix inside the bucket. Cert lands at s3://${S3_BUCKET}/${S3_PREFIX}/
 S3_PREFIX="${S3_PREFIX:-certs/wildcard}"
@@ -110,11 +111,10 @@ REMOTE_FINGERPRINT=""
 if aws s3api head-object \
         --bucket "${S3_BUCKET}" \
         --key "${S3_PREFIX}/fingerprint.txt" \
-        --region "${AWS_REGION}" \
         >/dev/null 2>&1; then
     REMOTE_FINGERPRINT=$(aws s3 cp \
         "s3://${S3_BUCKET}/${S3_PREFIX}/fingerprint.txt" - \
-        --region "${AWS_REGION}" 2>/dev/null || echo "")
+        2>/dev/null || echo "")
 fi
 
 if [[ "${FORCE}" == "1" ]]; then
@@ -132,7 +132,6 @@ log "Fingerprint differs (remote: '${REMOTE_FINGERPRINT:-<none>}'); uploading to
 # see a new fingerprint while the cert/key files are still in flight.
 
 UPLOAD_ARGS=(
-    --region "${AWS_REGION}"
     --only-show-errors
     --sse AES256
 )

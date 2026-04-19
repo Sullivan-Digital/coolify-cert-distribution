@@ -12,14 +12,13 @@
 #
 set -euo pipefail
 
-: "${AWS_REGION:?AWS_REGION must be set}"
 : "${S3_BUCKET:?S3_BUCKET must be set}"
 
 S3_PREFIX="${S3_PREFIX:-certs/wildcard}"
 WARN_DAYS="${HEALTHCHECK_WARN_DAYS:-14}"
 
 META=$(aws s3 cp "s3://${S3_BUCKET}/${S3_PREFIX}/metadata.json" - \
-    --region "${AWS_REGION}" 2>/dev/null) || {
+    2>/dev/null) || {
     echo "UNHEALTHY: could not fetch metadata.json from s3://${S3_BUCKET}/${S3_PREFIX}/" >&2
     exit 1
 }

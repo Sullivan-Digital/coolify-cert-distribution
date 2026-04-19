@@ -10,14 +10,13 @@
 set -euo pipefail
 
 # --- Required environment ---------------------------------------------------
-: "${AWS_REGION:?AWS_REGION must be set (e.g. ap-southeast-2)}"
 : "${S3_BUCKET:?S3_BUCKET must be set}"
 
 # --- Optional environment ---------------------------------------------------
-# AWS credentials are optional: if unset, the AWS CLI falls back to its
-# default credential chain, which picks up the EC2 instance profile / IAM
-# role attached to the host. Set AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY
-# explicitly only if you're running somewhere without an instance role.
+# AWS credentials and region are optional on EC2: if unset, the AWS CLI falls
+# back to its default chain, which picks up the instance profile / IAM role
+# and the region from IMDS. Set AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, and
+# AWS_REGION explicitly only if you're running somewhere without IMDS.
 
 S3_PREFIX="${S3_PREFIX:-certs/wildcard}"
 
@@ -55,7 +54,7 @@ log "Consumer checking s3://${S3_BUCKET}/${S3_PREFIX}/ for cert updates"
 
 REMOTE_FINGERPRINT=$(aws s3 cp \
     "s3://${S3_BUCKET}/${S3_PREFIX}/fingerprint.txt" - \
-    --region "${AWS_REGION}" 2>/dev/null || echo "")
+    2>/dev/null || echo "")
 
 if [[ -z "${REMOTE_FINGERPRINT}" ]]; then
     log "ERROR: could not fetch remote fingerprint. Is the bucket populated?"
@@ -85,9 +84,9 @@ STAGING=$(mktemp -d)
 trap 'rm -rf "${STAGING}"' EXIT
 
 aws s3 cp "s3://${S3_BUCKET}/${S3_PREFIX}/wildcard.crt" "${STAGING}/crt" \
-    --region "${AWS_REGION}" --only-show-errors
+    --only-show-errors
 aws s3 cp "s3://${S3_BUCKET}/${S3_PREFIX}/wildcard.key" "${STAGING}/key" \
-    --region "${AWS_REGION}" --only-show-errors
+    --only-show-errors
 
 # Verify the downloaded cert matches the fingerprint we saw.
 # Protects against partial/corrupt downloads and against the rare race
