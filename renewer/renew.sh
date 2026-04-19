@@ -107,9 +107,13 @@ export S3_BUCKET
 renew_one() {
     local cert="$1" zone="$2" s3_prefix="$3" slug="$4"
     local lego_path="${LEGO_ROOT}/${slug}"
-    local crt="${lego_path}/certificates/${cert}.crt"
-    local key="${lego_path}/certificates/${cert}.key"
-    local issuer="${lego_path}/certificates/${cert}.issuer.crt"
+    # Lego sanitises '*' to '_' in on-disk filenames for wildcard certs, so
+    # *.foo.com lands at certificates/_.foo.com.crt. Keep ${cert} as-is for
+    # ACME (--domains) and logging; only transform for filesystem paths.
+    local cert_file="${cert//\*/_}"
+    local crt="${lego_path}/certificates/${cert_file}.crt"
+    local key="${lego_path}/certificates/${cert_file}.key"
+    local issuer="${lego_path}/certificates/${cert_file}.issuer.crt"
 
     # Lego picks the zone by TXT record lookup via the AWS SDK — it only
     # needs the domain, not the zone id. Export AWS_REGION if set; lego's
