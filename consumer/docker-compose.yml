@@ -39,15 +39,6 @@ services:
       dockerfile: Dockerfile
     image: cert-consumer:latest
     container_name: cert-consumer
-    environment:
-      - STACK_NAME
-      - FETCHED_CERTS
-      - S3_BUCKET
-      - AWS_ACCESS_KEY_ID
-      - AWS_SECRET_ACCESS_KEY
-      - AWS_REGION
-      - RELOAD_METHOD
-      - PROXY_CONTAINER
     volumes:
       # Bind-mount the host's /data/coolify/proxy directory so we can write
       # to the same location that coolify-proxy reads from. Inside the

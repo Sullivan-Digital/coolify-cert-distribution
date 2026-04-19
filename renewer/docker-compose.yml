@@ -35,14 +35,6 @@ services:
     environment:
       - MANAGED_CERTS
       - ACME_EMAIL
-      - STACK_NAME
-      - S3_BUCKET
-      - AWS_ACCESS_KEY_ID
-      - AWS_SECRET_ACCESS_KEY
-      - AWS_REGION
-      - USE_STAGING
-      - RENEW_DAYS
-      - LEGO_ROOT
     volumes:
       # Persists the ACME account keys and issued certs across runs. Losing
       # this is not catastrophic (lego will just re-register and re-issue),
