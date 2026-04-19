@@ -1,10 +1,17 @@
 # cert-consumer
 
 Runs on **every** Coolify-managed server that has a `coolify-proxy` (Traefik)
-instance serving HTTPS with the distributed certs. On startup the container
-runs `fetch.sh` once to bootstrap (crashlooping on failure so config errors
-are visible), then stays running continuously. Coolify's **Scheduled Tasks**
-feature triggers subsequent fetches on a cron via `docker exec`.
+instance serving HTTPS with the distributed certs.
+
+The container is self-driving: `runner.sh` invokes `fetch.sh` immediately
+at startup (bootstrap) and then every `RUN_INTERVAL_SECONDS` (default 6h)
+for the life of the container. A failed bootstrap exits the container so
+Coolify's restart policy loops it — day-1 config errors (IAM, bucket,
+network, SSM mappings) surface as a visible crashloop rather than a
+silently unhealthy container. Subsequent failures are recorded in
+`/var/run/cert-consumer.status` for the healthcheck to read but don't
+kill the loop — a transient S3 blip shouldn't drop the cert Traefik is
+already serving. No Coolify Scheduled Task is needed.
 
 The script polls S3 for each expected cert, downloads any that changed,
 verifies fingerprint + key/cert pair, writes them to disk, emits one Traefik
@@ -42,6 +49,8 @@ everything it needs from SSM.
 - `RELOAD_METHOD` — `touch` (default) | `restart` | `none`.
 - `PROXY_CONTAINER` — default `coolify-proxy`, only used when
   `RELOAD_METHOD=restart`.
+- `RUN_INTERVAL_SECONDS` — seconds between `runner.sh` iterations.
+  Default `21600` (6h).
 
 ## On-disk layout
 
@@ -92,13 +101,16 @@ you hit an edge case where the touch method doesn't pick up changes.
 ## Failure semantics
 
 `fetch.sh` exits non-zero on the first failure (missing fingerprint, download
-error, fingerprint mismatch, key/cert mismatch, etc.). `entrypoint.sh` runs
-`fetch.sh` at startup with `set -euo pipefail`, so any failure crashes the
-container and Coolify's restart policy loops it — better a visible
-crashloop than a silently unhealthy container on day 1.
+error, fingerprint mismatch, key/cert mismatch, etc.). `runner.sh` treats
+the very first iteration as a bootstrap: if it fails, the container exits
+non-zero and Coolify's restart policy loops it — better a visible
+crashloop than a silently unhealthy container on day 1. Subsequent
+failures are recorded in `/var/run/cert-consumer.status` (picked up by the
+healthcheck) but don't kill the loop, so a transient S3 blip won't drop
+the cert Traefik is already serving.
 
-On subsequent scheduled-task runs, a single cert failure still fails the
-whole run — partial success semantics would hide real problems.
+Within a single run, a single cert failure still fails the whole run —
+partial success semantics would hide real problems.
 
 ## Deployment on Coolify
 
@@ -106,20 +118,28 @@ whole run — partial success semantics would hide real problems.
    that has a Coolify proxy running.
 2. Set any env vars you need in Coolify's UI. For the common case with an
    instance profile attached, you don't need any.
-3. Deploy it. The container runs `fetch.sh` once at startup to populate
-   the certs; if that fails (IAM, bucket, network, missing mappings) the
-   container exits and Coolify's restart policy loops it, so config errors
-   are visible rather than silent. After a successful bootstrap it stays
-   running for scheduled-task execs.
-4. Under **Scheduled Tasks**, click **+ Add New**:
-   - Name: `fetch`
-   - Command: `/usr/local/bin/fetch.sh`
-   - Frequency: `0 */12 * * *` (every 12 hours — adjust to taste)
-   - Container: `cert-consumer`
+3. Deploy it. `runner.sh` immediately invokes `fetch.sh` to bootstrap;
+   if that fails (IAM, bucket, network, missing mappings) the container
+   exits and Coolify's restart policy loops it, so config errors are
+   visible rather than silent. After a successful bootstrap the loop
+   continues every `RUN_INTERVAL_SECONDS` (default 6h).
 
-Subsequent scheduled-task runs only transfer bytes when the renewer has
-uploaded a new version of a cert (compared by SHA-256 fingerprint per
-cert).
+Each loop iteration only transfers bytes when the renewer has uploaded a
+new version of a cert (compared by SHA-256 fingerprint per cert).
+
+### Healthcheck
+
+The healthcheck has two gates:
+
+1. Reads `/var/run/cert-consumer.status` (written by `runner.sh` after each
+   run) — exits unhealthy if the last run's `status` is `fail`. A missing
+   file is treated as OK (start_period handles the bootstrap window).
+2. Iterates the expected cert set and exits unhealthy if any expected cert
+   is missing on disk or expires within `HEALTHCHECK_WARN_DAYS` (default
+   14).
+
+The first gate catches a broken runner within a single interval; the second
+is the belt-and-braces check against cert expiry.
 
 ## IAM policy for the AWS credentials
 

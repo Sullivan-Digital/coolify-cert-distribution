@@ -4,12 +4,17 @@ Runs on **one** server (any Coolify-managed host — typically your control plan
 Obtains every certificate listed in `MANAGED_CERTS` from Let's Encrypt via
 Route 53 DNS-01 and publishes each one to the shared S3 bucket.
 
-The container stays running continuously (a trivial `sleep infinity`); the
-actual renewal work is triggered via Coolify's **Scheduled Tasks** feature,
-which `docker exec`s into the container on a cron. Each execution is
-idempotent per cert — lego only actually renews when a cert has less than
-`RENEW_DAYS` (default 30) of validity remaining, and the S3 upload step
-only fires when that cert's fingerprint actually changed.
+The container is self-driving: `runner.sh` invokes `renew.sh` every
+`RUN_INTERVAL_SECONDS` (default 6h) for the life of the container and
+records each run's outcome to `/var/run/cert-renewer.status` — the
+healthcheck reads that file, so a string of failed runs is visible in
+Coolify long before any cert approaches expiry. No Coolify Scheduled Task
+is needed. Each run is idempotent per cert — lego only actually renews
+when a cert has less than `RENEW_DAYS` (default 30) of validity remaining,
+and the S3 upload step only fires when that cert's fingerprint changed.
+
+`docker exec cert-renewer /usr/local/bin/renew.sh [--force]` still works
+for ad-hoc / forced runs.
 
 ## Environment variables
 
@@ -36,6 +41,8 @@ only fires when that cert's fingerprint actually changed.
   instance role attached.
 - `USE_STAGING` — `true`/`1`/`yes` to use Let's Encrypt staging.
 - `RENEW_DAYS` — days-before-expiry renewal window. Default 30.
+- `RUN_INTERVAL_SECONDS` — seconds between `runner.sh` iterations.
+  Default `21600` (6h).
 - `LEGO_ROOT` — parent dir for per-cert lego state. Default `/data/lego`;
   each cert lands at `${LEGO_ROOT}/<slug>/`.
 
@@ -90,19 +97,14 @@ never see a new fingerprint paired with stale cert bytes.
 2. Set `MANAGED_CERTS` and `ACME_EMAIL` in Coolify's UI. Add `STACK_NAME`
    only if you deployed CDK under a non-default name. Everything else is
    optional.
-3. Deploy it. The container starts and stays running (it just sleeps —
-   renewal is triggered by scheduled task, not container startup).
-4. Under the resource's **Scheduled Tasks** tab, click **+ Add New**:
-   - Name: `renew`
-   - Command: `/usr/local/bin/renew.sh`
-   - Frequency: `0 3 * * *` (daily at 03:00 UTC)
-   - Container: `cert-renewer` (only shown for multi-service composes)
-5. Trigger the task manually from the UI to run the first issuance.
-   Check execution history for stdout/stderr output.
+3. Deploy it. The container starts and `runner.sh` immediately invokes
+   `renew.sh`. Watch the container logs in Coolify for the first run's
+   output.
 
-Subsequent runs are no-ops per cert until each is within `RENEW_DAYS`
-(default 30) of expiry — lego exits 0 without renewing and the script
-detects no fingerprint change, so nothing gets pushed to S3.
+Subsequent runs (every `RUN_INTERVAL_SECONDS`, default 6h) are no-ops per
+cert until each is within `RENEW_DAYS` (default 30) of expiry — lego
+exits 0 without renewing and the script detects no fingerprint change,
+so nothing gets pushed to S3.
 
 ### Recommendation: test against staging first
 
@@ -116,7 +118,23 @@ try to renew the staging certs), and re-run to get production certs.
 `docker exec cert-renewer /usr/local/bin/renew.sh --force` re-issues every
 cert regardless of current expiry and re-uploads regardless of fingerprint
 match. Useful for end-to-end testing; pair with `USE_STAGING=true` to avoid
-burning production rate limits.
+burning production rate limits. (Ad-hoc execs run alongside the internal
+loop — no scheduling coordination needed.)
+
+### Healthcheck
+
+The healthcheck has two gates:
+
+1. Reads `/var/run/cert-renewer.status` (written by `runner.sh` after each
+   run) — exits unhealthy if the last run's `status` is `fail`. A missing
+   file is treated as OK, so the container is healthy during `start_period`
+   before the first iteration completes.
+2. Iterates `MANAGED_CERTS`, reads each cert's `metadata.json` from S3, and
+   exits unhealthy if any `not_after` is within `HEALTHCHECK_WARN_DAYS`
+   (default 14) or any metadata is missing.
+
+The first gate catches a broken runner within a single interval; the second
+is the belt-and-braces check against cert expiry.
 
 ## IAM policy for the AWS credentials
 

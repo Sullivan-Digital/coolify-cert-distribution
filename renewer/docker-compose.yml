@@ -1,9 +1,11 @@
 # Deploy this as a Docker Compose resource in Coolify.
 #
-# This container stays running continuously (sleep infinity). The actual
-# renewal work is triggered by Coolify's Scheduled Tasks feature, which
-# runs `docker exec cert-renewer /usr/local/bin/renew.sh` on a cron.
-# See README for scheduled-task setup.
+# The container loops internally: runner.sh invokes renew.sh every
+# RUN_INTERVAL_SECONDS (default 6h) for the life of the container, and
+# records each run's outcome to /var/run/cert-renewer.status for the
+# healthcheck. No Coolify Scheduled Task setup is needed — deploy and
+# forget. For ad-hoc or --force runs, `docker exec cert-renewer
+# /usr/local/bin/renew.sh [--force]` still works.
 #
 # Required environment variables (set these in Coolify's UI, not here):
 #   MANAGED_CERTS       whitespace-separated list of cert domains to issue
@@ -23,6 +25,7 @@
 #   AWS_SECRET_ACCESS_KEY   CLI both pick up creds from IMDS.
 #   USE_STAGING         "true" for Let's Encrypt staging (testing)
 #   RENEW_DAYS          days-before-expiry renewal window (default: 30)
+#   RUN_INTERVAL_SECONDS   seconds between runner.sh iterations (default: 21600 = 6h)
 #   LEGO_ROOT           parent dir for per-cert lego state (default: /data/lego)
 
 services:
@@ -45,18 +48,18 @@ services:
       # this is not catastrophic (lego will just re-register and re-issue),
       # but it burns LE rate-limit slots unnecessarily.
       - lego_data:/data/lego
-    # Healthcheck iterates MANAGED_CERTS and reads each cert's metadata.json
-    # from S3. Fails if any not_after is within 14 days (HEALTHCHECK_WARN_DAYS)
-    # or if any metadata is missing. Coolify surfaces unhealthy containers via
-    # its notifications.
+    # Healthcheck fails if either:
+    #   - the last runner.sh iteration of renew.sh failed
+    #     (/var/run/cert-renewer.status), or
+    #   - any cert's S3 metadata.json is missing or expires within 14 days
+    #     (HEALTHCHECK_WARN_DAYS).
+    # Coolify surfaces unhealthy containers via its notifications.
     healthcheck:
       test: ["CMD", "/usr/local/bin/healthcheck.sh"]
       interval: 1h
       timeout: 30s
-      start_period: 1m
+      start_period: 10m
       retries: 3
-    # Container stays up continuously so Coolify's Scheduled Tasks feature
-    # can `docker exec` into it on a cron.
     restart: unless-stopped
 
 volumes:

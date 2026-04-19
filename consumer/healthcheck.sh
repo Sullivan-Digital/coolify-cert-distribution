@@ -24,6 +24,24 @@ STACK_NAME="${STACK_NAME:-CertDistributionStack}"
 CERT_OUT_DIR="${CERT_OUT_DIR:-/host-coolify/proxy/certs}"
 WARN_DAYS="${HEALTHCHECK_WARN_DAYS:-14}"
 WARN_SECONDS=$(( WARN_DAYS * 86400 ))
+STATUS_FILE="${RUNNER_STATUS_FILE:-/var/run/cert-consumer.status}"
+
+# Runner status: fail fast if the last fetch.sh invocation failed. The file is
+# absent during start_period on a fresh container; that's fine — compose's
+# start_period covers the window before the first loop iteration completes.
+if [[ -f "$STATUS_FILE" ]]; then
+    status=$(jq -r '.status // "unknown"' "$STATUS_FILE" 2>/dev/null || echo "unreadable")
+    if [[ "$status" == "fail" ]]; then
+        ran_at=$(jq -r '.ran_at // "?"' "$STATUS_FILE" 2>/dev/null || echo "?")
+        exit_code=$(jq -r '.exit_code // "?"' "$STATUS_FILE" 2>/dev/null || echo "?")
+        echo "UNHEALTHY: last fetch.sh run failed (exit ${exit_code}, at ${ran_at})" >&2
+        exit 1
+    fi
+    if [[ "$status" == "unreadable" ]]; then
+        echo "UNHEALTHY: ${STATUS_FILE} is unreadable" >&2
+        exit 1
+    fi
+fi
 
 # Best-effort: resolve AWS_REGION from IMDSv2 if unset, so aws-cli calls
 # below don't depend on SDK-level region discovery.

@@ -2,11 +2,14 @@
 # runs a coolify-proxy (Traefik) instance that should serve the distributed
 # certs.
 #
-# On startup the container runs fetch.sh once to bootstrap the certs, then
-# stays running continuously (sleep infinity). Ongoing fetches are triggered
-# by Coolify's Scheduled Tasks feature, which runs
-# `docker exec cert-consumer /usr/local/bin/fetch.sh` on a cron.
-# See README for scheduled-task setup.
+# The container loops internally: runner.sh runs fetch.sh immediately
+# (bootstrap) and then every RUN_INTERVAL_SECONDS (default 6h) for the
+# life of the container. A failed bootstrap run exits the container so
+# Coolify's restart policy loops it — day-1 config errors (IAM, bucket,
+# network, SSM mappings) surface as a visible crashloop. Subsequent
+# failures are recorded in /var/run/cert-consumer.status for the
+# healthcheck, but don't kill the loop. No Coolify Scheduled Task setup
+# is needed.
 #
 # Required environment variables: none — the consumer discovers everything
 # from SSM. On EC2 with an instance role attached, deploy with no env vars
@@ -28,6 +31,7 @@
 #   AWS_SECRET_ACCESS_KEY   up creds from IMDS automatically.
 #   RELOAD_METHOD       touch (default) | restart | none
 #   PROXY_CONTAINER     default: coolify-proxy (only used if RELOAD_METHOD=restart)
+#   RUN_INTERVAL_SECONDS   seconds between runner.sh iterations (default: 21600 = 6h)
 #
 # Upgrade note: earlier versions of this container read `S3_PREFIX`; it is
 # silently ignored now. Safe to remove from Coolify env on existing deploys.
@@ -52,15 +56,17 @@ services:
       # Required only if RELOAD_METHOD=restart. If you're using the default
       # RELOAD_METHOD=touch, you can remove this mount.
       - /var/run/docker.sock:/var/run/docker.sock
-    # Healthcheck iterates the expected cert set (FETCHED_CERTS if set, else
-    # every cert in the SSM mappings) and fails if any expected cert is
-    # missing on disk or expires within 14 days. Note: on a fresh install
-    # the container will be unhealthy until the first fetch.sh run —
-    # entrypoint.sh runs fetch.sh once at startup to avoid that.
+    # Healthcheck fails if either:
+    #   - the last runner.sh iteration of fetch.sh failed
+    #     (/var/run/cert-consumer.status), or
+    #   - any expected cert (FETCHED_CERTS if set, else every cert in the
+    #     SSM mappings) is missing on disk or expires within 14 days.
+    # start_period covers the window before runner.sh's first iteration
+    # writes the status file.
     healthcheck:
       test: ["CMD", "/usr/local/bin/healthcheck.sh"]
       interval: 1h
       timeout: 10s
-      start_period: 1m
+      start_period: 2m
       retries: 3
     restart: unless-stopped

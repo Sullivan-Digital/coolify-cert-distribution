@@ -23,15 +23,17 @@ RUN apk add --no-cache \
 
 COPY lib/common.sh /usr/local/lib/cert-distribution/common.sh
 COPY renew.sh /usr/local/bin/renew.sh
+COPY runner.sh /usr/local/bin/runner.sh
 COPY healthcheck.sh /usr/local/bin/healthcheck.sh
-RUN chmod +x /usr/local/bin/renew.sh /usr/local/bin/healthcheck.sh
+RUN chmod +x /usr/local/bin/renew.sh /usr/local/bin/runner.sh /usr/local/bin/healthcheck.sh
 
 # Lego writes per-cert state under /data/lego/<slug>/. Mount a persistent
 # volume at /data/lego so ACME account keys and cert history survive
 # container restarts.
 WORKDIR /data/lego
 
-# Container stays running so Coolify's Scheduled Tasks can `docker exec` into
-# it. The actual work is triggered by invoking /usr/local/bin/renew.sh via
-# Scheduled Tasks, not by the container's own lifecycle.
-CMD ["sleep", "infinity"]
+# runner.sh invokes renew.sh every RUN_INTERVAL_SECONDS (default 6h) and
+# records each run's outcome to /var/run/cert-renewer.status for the
+# healthcheck to read. `docker exec cert-renewer /usr/local/bin/renew.sh`
+# still works for ad-hoc / --force runs.
+CMD ["/usr/local/bin/runner.sh"]

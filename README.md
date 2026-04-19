@@ -88,21 +88,21 @@ Each folder has its own README with deployment and IAM-policy details.
 3. Deploy the renewer somewhere. Set `MANAGED_CERTS` (whitespace-separated
    list of cert domains to issue — each must appear in the CDK `--cert`
    input), `ACME_EMAIL`, and optionally `STACK_NAME` if you renamed the
-   stack. Container starts and sits idle.
-4. Add a Scheduled Task to the renewer: command `/usr/local/bin/renew.sh`,
-   cron `0 3 * * *`. Set `USE_STAGING=true` for the first run.
-5. Trigger the task manually. Validate staging certs land in S3 under
+   stack. Set `USE_STAGING=true` for the first deploy. The container's
+   internal loop (`runner.sh`) invokes `renew.sh` immediately on startup.
+4. Watch the container logs; validate staging certs land in S3 under
    `s3://BUCKET/certs/<slug>/` (one prefix per cert).
-6. Set `USE_STAGING=false`, delete the `lego_data` volume so lego forgets
-   the staging accounts, re-trigger the task.
-7. Verify production certs are in S3 (`aws s3 ls s3://BUCKET/certs/`).
-8. Deploy the consumer on each proxy-serving VPS. With an instance profile
+5. Set `USE_STAGING=false`, delete the `lego_data` volume so lego forgets
+   the staging accounts, restart the container (the first loop iteration
+   re-issues from the production LE endpoint).
+6. Verify production certs are in S3 (`aws s3 ls s3://BUCKET/certs/`).
+7. Deploy the consumer on each proxy-serving VPS. With an instance profile
    attached, no required env vars — it discovers bucket + mappings via SSM.
-   Set `FETCHED_CERTS` if this server only needs a subset. It runs
-   `fetch.sh` once at container start to bootstrap (container crashloops if
-   this fails — check logs). Then add its scheduled task: command
-   `/usr/local/bin/fetch.sh`, cron `0 */12 * * *`, for ongoing pulls.
-9. On each server, ensure the Coolify Traefik proxy is set up for file-based
+   Set `FETCHED_CERTS` if this server only needs a subset. `runner.sh`
+   runs `fetch.sh` immediately at startup (container crashloops if this
+   bootstrap fails — check logs) and then loops on `RUN_INTERVAL_SECONDS`
+   (default 6h) thereafter.
+8. On each server, ensure the Coolify Traefik proxy is set up for file-based
    certs rather than ACME:
    a. Remove any `--certificatesresolvers...acme...` flags from the proxy
       compose (Servers → Proxy → Configuration) — they're no longer needed.
@@ -131,20 +131,27 @@ Each folder has its own README with deployment and IAM-policy details.
   no loaded cert now get Traefik's self-signed cert instead of the old LE
   wildcard; both produce a browser warning, just a different cert shown.
 
-## Why containers stay running instead of run-to-completion
+## Why containers loop internally
 
-Coolify's Scheduled Tasks feature works by `docker exec`-ing into a
-**running** container on a schedule. That's why both containers use
-`sleep infinity` as their main process — they exist only so there's
-somewhere for the scheduled task to exec. Resource cost is negligible
-(~5MB RAM per container).
+Both containers run `runner.sh` as PID 1, which invokes the work script
+(`renew.sh` / `fetch.sh`) every `RUN_INTERVAL_SECONDS` (default 6h) and
+writes each run's outcome to `/var/run/cert-<role>.status` for the
+healthcheck. This means:
 
-An alternative would be running the scripts via host cron (not touching
-Coolify's scheduler). This works but costs you Coolify's UI-based
-execution history, log viewing, and cron editing. Not worth it unless
-you're specifically avoiding Coolify's scheduler (e.g., because of known
-reliability issues with its internal scheduler — see Coolify issue #6638
-for context).
+- **No Coolify Scheduled Task setup.** Deploy the compose resource and
+  it's done — the container drives its own schedule.
+- **Healthcheck covers broken runs, not just cert expiry.** A string of
+  failed runs flips the container unhealthy within a single interval,
+  surfacing the problem via Coolify's notifications long before any cert
+  approaches expiry.
+- **Logs land in Coolify's container-log view.** Every iteration's
+  stdout/stderr is just container output, no separate Scheduled Task
+  execution-history page to check.
+
+`docker exec` still works for ad-hoc runs — e.g.
+`docker exec cert-renewer /usr/local/bin/renew.sh --force` for forced
+re-issuance. These run alongside the internal loop with no coordination
+needed; both the renew and fetch scripts are idempotent.
 
 ## Monitoring — don't skip this
 
