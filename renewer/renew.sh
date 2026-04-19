@@ -59,7 +59,26 @@ log() {
     echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] $*"
 }
 
-require_tools jq aws openssl lego || exit 1
+require_tools jq aws openssl lego curl || exit 1
+
+# --- Resolve AWS region -----------------------------------------------------
+# Lego's Route 53 provider (AWS SDK Go v2) requires a region even though
+# Route 53 is global — without one, its endpoint resolver errors out with
+# "Invalid Configuration: Missing Region". The SDK's own IMDS region
+# discovery is unreliable from inside Docker, so fetch it ourselves via
+# IMDSv2 and export AWS_REGION before invoking lego.
+if [[ -z "${AWS_REGION:-}" ]]; then
+    if region=$(resolve_region_from_imds); then
+        log "Resolved AWS_REGION=${region} from IMDSv2"
+        export AWS_REGION="${region}"
+    else
+        log "ERROR: AWS_REGION is unset and could not be resolved from IMDSv2."
+        log "       The compose file should set network_mode: host so IMDSv2 is"
+        log "       reachable from the container; if you've overridden that, either"
+        log "       restore it or set AWS_REGION explicitly in the environment."
+        exit 1
+    fi
+fi
 
 # --- Fetch SSM mappings + optional S3_BUCKET fallback -----------------------
 log "Loading cert→zone mappings from SSM (/${STACK_NAME}/certMappings)"

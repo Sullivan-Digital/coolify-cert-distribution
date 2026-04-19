@@ -29,7 +29,10 @@ everything it needs from SSM.
 - `S3_BUCKET` — bucket name. If unset, read from `/${STACK_NAME}/bucketName`
   via SSM.
 - `AWS_REGION` / `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` — omit on
-  EC2 with an instance role attached.
+  EC2 with an instance role attached. `AWS_REGION` is resolved from
+  IMDSv2 at startup (best-effort); set it explicitly if running without
+  IMDS. (The compose file uses `network_mode: host` so IMDSv2 is
+  reachable regardless of the instance's `HttpPutResponseHopLimit`.)
 - `CERT_OUT_DIR` — where cert files land. Default `/host-coolify/proxy/certs`
   (matches Coolify's default bind mount).
 - `DYNAMIC_OUT_DIR` — where the Traefik dynamic YAML lands. Default

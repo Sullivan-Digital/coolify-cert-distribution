@@ -47,7 +47,17 @@ log() {
     echo "[$(date -u +'%Y-%m-%dT%H:%M:%SZ')] $*"
 }
 
-require_tools jq aws openssl || exit 1
+require_tools jq aws openssl curl || exit 1
+
+# --- Resolve AWS region (best-effort) ---------------------------------------
+# The AWS CLI usually resolves the region from IMDS on its own, but doing it
+# out-of-band and exporting AWS_REGION avoids relying on SDK-level behaviour.
+# Non-fatal here: if IMDS is unreachable, fall through and let aws-cli try.
+if [[ -z "${AWS_REGION:-}" ]]; then
+    if region=$(resolve_region_from_imds); then
+        export AWS_REGION="${region}"
+    fi
+fi
 
 # --- Load SSM mappings + optional S3_BUCKET fallback ------------------------
 log "Loading cert→zone mappings from SSM (/${STACK_NAME}/certMappings)"

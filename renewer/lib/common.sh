@@ -46,6 +46,34 @@ require_tools() {
     fi
 }
 
+# Fetch the AWS region from EC2 IMDSv2. Echoes the region on stdout, or
+# returns non-zero (with no output) if IMDS is unreachable, the token PUT
+# fails, or the region lookup returns nothing.
+#
+# Why we need this: lego's Route 53 provider uses AWS SDK Go v2, whose
+# endpoint rules require a region even for the globally-scoped Route 53
+# service. The SDK's own IMDS region discovery is flaky from inside
+# containers, so we resolve the region out-of-band and export AWS_REGION
+# before invoking lego. The renewer compose file uses network_mode: host
+# so IMDSv2 is reachable regardless of the instance's hop-limit setting.
+resolve_region_from_imds() {
+    local token region
+    token=$(curl -fsS \
+        --connect-timeout 1 --max-time 2 \
+        -X PUT \
+        -H "X-aws-ec2-metadata-token-ttl-seconds: 60" \
+        http://169.254.169.254/latest/api/token 2>/dev/null) || return 1
+    [[ -z "$token" ]] && return 1
+
+    region=$(curl -fsS \
+        --connect-timeout 1 --max-time 2 \
+        -H "X-aws-ec2-metadata-token: ${token}" \
+        http://169.254.169.254/latest/meta-data/placement/region 2>/dev/null) || return 1
+    [[ -z "$region" ]] && return 1
+
+    printf '%s' "$region"
+}
+
 # Fetch /<STACK_NAME>/certMappings from SSM and echo the JSON string.
 # Caller is responsible for having STACK_NAME set.
 load_ssm_mappings() {

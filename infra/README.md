@@ -135,6 +135,16 @@ aws ec2 associate-iam-instance-profile \
 The change is live immediately — no instance restart required. IMDS starts
 serving the new credentials within seconds.
 
+### IMDSv2 reachability from containers
+
+Both cert-renewer and cert-consumer resolve `AWS_REGION` from IMDSv2 at
+startup. To make that work without requiring a change to the instance's
+`HttpPutResponseHopLimit` (EC2 default is 1, which blocks the token
+`PUT` from bridge-mode containers), both compose files set
+`network_mode: host`. That scopes IMDS reachability to these two
+services — other containers on the host still go through bridge
+networking and hit the default hop limit as intended.
+
 ## Teardown
 
 ```bash

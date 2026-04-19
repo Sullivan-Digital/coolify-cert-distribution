@@ -27,8 +27,11 @@ only fires when that cert's fingerprint actually changed.
   `CertDistributionStack`. Override if you deployed under a different name.
 - `S3_BUCKET` — bucket name. If unset, read from `/${STACK_NAME}/bucketName`
   via SSM.
-- `AWS_REGION` — on EC2 the AWS CLI reads the region from IMDS
-  automatically; set this only if running somewhere without IMDS.
+- `AWS_REGION` — on EC2 the renewer resolves the region from IMDSv2
+  automatically at the start of `renew.sh`, so this can be left unset.
+  Set it explicitly when running somewhere without IMDS. (The compose
+  file uses `network_mode: host` so IMDSv2 is reachable regardless of
+  the instance's `HttpPutResponseHopLimit` setting.)
 - `AWS_ACCESS_KEY_ID` / `AWS_SECRET_ACCESS_KEY` — omit on EC2 with an
   instance role attached.
 - `USE_STAGING` — `true`/`1`/`yes` to use Let's Encrypt staging.
@@ -147,6 +150,24 @@ Create the S3 bucket with:
 - **Versioning: ON** (optional but recommended — gives you audit history
   and one-click rollback if a bad cert ever gets uploaded).
 - **Bucket policy: none** — IAM alone controls access.
+
+## Troubleshooting
+
+### `Invalid Configuration: Missing Region` from lego
+
+Lego's Route 53 provider (AWS SDK Go v2) requires a region even though
+Route 53 is global. `renew.sh` resolves one from IMDSv2 before invoking
+lego — if that fails you'll see:
+
+```
+[…] ERROR: AWS_REGION is unset and could not be resolved from IMDSv2.
+```
+
+The compose file uses `network_mode: host` precisely so IMDSv2 is
+reachable from inside the container without fiddling with the
+instance's `HttpPutResponseHopLimit`. If you've changed that, switch
+back — or set `AWS_REGION` explicitly in the Coolify UI for the
+cert-renewer service (works anywhere, IMDS or not).
 
 ## Upgrading from the single-cert version
 

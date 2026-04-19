@@ -24,6 +24,14 @@ fi
 STACK_NAME="${STACK_NAME:-CertDistributionStack}"
 WARN_DAYS="${HEALTHCHECK_WARN_DAYS:-14}"
 
+# Best-effort: resolve AWS_REGION from IMDSv2 if unset, so aws-cli calls
+# below don't depend on SDK-level region discovery.
+if [[ -z "${AWS_REGION:-}" ]]; then
+    if region=$(resolve_region_from_imds); then
+        export AWS_REGION="${region}"
+    fi
+fi
+
 if [[ -z "${S3_BUCKET:-}" ]]; then
     S3_BUCKET=$(load_ssm_bucket_name) || {
         echo "UNHEALTHY: S3_BUCKET unset and /${STACK_NAME}/bucketName lookup failed" >&2

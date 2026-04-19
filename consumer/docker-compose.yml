@@ -22,8 +22,8 @@
 #                       cert in the mapping table.
 #   S3_BUCKET           bucket name. Optional: if unset, read from
 #                       /${STACK_NAME}/bucketName in SSM.
-#   AWS_REGION          on EC2 the AWS CLI reads the region from IMDS
-#                       automatically; set this only if running without IMDS.
+#   AWS_REGION          resolved from IMDSv2 at startup on EC2 (best-effort);
+#                       set explicitly if running without IMDS.
 #   AWS_ACCESS_KEY_ID   omit on EC2 with an instance role — the AWS CLI picks
 #   AWS_SECRET_ACCESS_KEY   up creds from IMDS automatically.
 #   RELOAD_METHOD       touch (default) | restart | none
@@ -39,6 +39,11 @@ services:
       dockerfile: Dockerfile
     image: cert-consumer:latest
     container_name: cert-consumer
+    # Host networking so IMDSv2 is reachable without touching the instance's
+    # HttpPutResponseHopLimit (EC2 default 1 blocks bridge-mode containers).
+    # fetch.sh and the healthcheck don't listen on any port, so there's no
+    # collision risk with Traefik or other services on the host.
+    network_mode: host
     volumes:
       # Bind-mount the host's /data/coolify/proxy directory so we can write
       # to the same location that coolify-proxy reads from. Inside the

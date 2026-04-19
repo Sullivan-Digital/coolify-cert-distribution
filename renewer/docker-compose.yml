@@ -17,8 +17,8 @@
 #                       CertDistributionStack. Match whatever you deployed.
 #   S3_BUCKET           bucket name. Optional: if unset, read from
 #                       /${STACK_NAME}/bucketName in SSM.
-#   AWS_REGION          on EC2 the AWS CLI reads the region from IMDS
-#                       automatically; set this only if running without IMDS.
+#   AWS_REGION          resolved from IMDSv2 at startup on EC2, so normally
+#                       leave unset. Set explicitly if running without IMDS.
 #   AWS_ACCESS_KEY_ID   omit on EC2 with an instance role — lego and the AWS
 #   AWS_SECRET_ACCESS_KEY   CLI both pick up creds from IMDS.
 #   USE_STAGING         "true" for Let's Encrypt staging (testing)
@@ -32,6 +32,11 @@ services:
       dockerfile: Dockerfile
     image: cert-renewer:latest
     container_name: cert-renewer
+    # Host networking so IMDSv2 is reachable without touching the instance's
+    # HttpPutResponseHopLimit (EC2 default 1 blocks bridge-mode containers).
+    # Neither renew.sh nor the healthcheck listens on any port, so there's
+    # no collision risk with services on the host.
+    network_mode: host
     environment:
       - MANAGED_CERTS
       - ACME_EMAIL

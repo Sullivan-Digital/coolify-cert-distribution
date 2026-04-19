@@ -25,6 +25,14 @@ CERT_OUT_DIR="${CERT_OUT_DIR:-/host-coolify/proxy/certs}"
 WARN_DAYS="${HEALTHCHECK_WARN_DAYS:-14}"
 WARN_SECONDS=$(( WARN_DAYS * 86400 ))
 
+# Best-effort: resolve AWS_REGION from IMDSv2 if unset, so aws-cli calls
+# below don't depend on SDK-level region discovery.
+if [[ -z "${AWS_REGION:-}" ]]; then
+    if region=$(resolve_region_from_imds); then
+        export AWS_REGION="${region}"
+    fi
+fi
+
 # Determine expected cert set.
 EXPECTED=()
 if [[ -n "${FETCHED_CERTS:-}" ]]; then
